@@ -500,7 +500,6 @@ FlightMode VehicleController::navStateToFlightMode_(uint8_t nav_state) const {
     
     case NavState::NAVIGATION_STATE_MANUAL:
     case NavState::NAVIGATION_STATE_STAB:
-    case NavState::NAVIGATION_STATE_RATTITUDE:
       return FlightMode::MANUAL;
     
     case NavState::NAVIGATION_STATE_ALTCTL:
@@ -521,8 +520,7 @@ FlightMode VehicleController::navStateToFlightMode_(uint8_t nav_state) const {
     case NavState::NAVIGATION_STATE_ACRO:
       return FlightMode::ACRO;
     
-    case NavState::NAVIGATION_STATE_STAB:
-      return FlightMode::STABILIZED;
+
     
     default:
       return FlightMode::OTHERS;

@@ -48,7 +48,7 @@ set(project_SOURCE_FILES
   src/guidance_controller.cpp
   src/los_estimator.cpp
   src/vehicle_controller.cpp    
-  # src/sensor_sync.cpp
+  src/sensor_sync.cpp
 )
 
 # Executable target

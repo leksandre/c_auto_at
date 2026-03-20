@@ -252,52 +252,52 @@ Eigen::Vector3d GuidanceController::computePnPI_(
   double los_err_z = los_err.z();
   
   // Интеграл с anti-windup (Y axis)
-  if (!((los_err_int_y_ >= config_.los_y_int_limit_ && los_err_y > 0.0) ||
-        (los_err_int_y_ <= -config_.los_y_int_limit_ && los_err_y < 0.0))) {
-    los_err_int_y_ += config_.los_y_ki_ * los_err_y * dt;
+  if (!((los_err_int_y_ >= config_.los_y_int_limit && los_err_y > 0.0) ||
+        (los_err_int_y_ <= -config_.los_y_int_limit && los_err_y < 0.0))) {
+    los_err_int_y_ += config_.los_y_ki * los_err_y * dt;
   }
   
   // Интеграл с anti-windup (Z axis)
-  if (!((los_err_int_z_ >= config_.los_z_int_limit_ && los_err_z > 0.0) ||
-        (los_err_int_z_ <= -config_.los_z_int_limit_ && los_err_z < 0.0))) {
-    los_err_int_z_ += config_.los_z_ki_ * los_err_z * dt;
+  if (!((los_err_int_z_ >= config_.los_z_int_limit && los_err_z > 0.0) ||
+        (los_err_int_z_ <= -config_.los_z_int_limit && los_err_z < 0.0))) {
+    los_err_int_z_ += config_.los_z_ki * los_err_z * dt;
   }
   
   // Feedforward (Y axis)
   double ay_pn_ff = 0.0;
   if (config_.los_y_ff_enable) {
-    if (u_los.y() > config_.los_y_err_ff_limit_) {
-      ay_pn_ff = config_.los_y_ff_ * (u_los.y() - config_.los_y_err_ff_limit_);
-    } else if (u_los.y() < -config_.los_y_err_ff_limit_) {
-      ay_pn_ff = config_.los_y_ff_ * (u_los.y() + config_.los_y_err_ff_limit_);
+    if (u_los.y() > config_.los_y_err_ff_limit) {
+      ay_pn_ff = config_.los_y_ff * (u_los.y() - config_.los_y_err_ff_limit);
+    } else if (u_los.y() < -config_.los_y_err_ff_limit) {
+      ay_pn_ff = config_.los_y_ff * (u_los.y() + config_.los_y_err_ff_limit);
     }
-    ay_pn_ff = clamp_(ay_pn_ff, -config_.los_y_ff_limit_, config_.los_y_ff_limit_);
+    ay_pn_ff = clamp_(ay_pn_ff, -config_.los_y_ff_limit, config_.los_y_ff_limit);
   }
   
   // Feedforward (Z axis)
   double az_pn_ff = 0.0;
   if (config_.los_z_ff_enable) {
-    if (u_los.z() > config_.los_z_err_ff_limit_) {
-      az_pn_ff = config_.los_z_ff_ * (u_los.z() - config_.los_z_err_ff_limit_);
-    } else if (u_los.z() < -config_.los_z_err_ff_limit_) {
-      az_pn_ff = config_.los_z_ff_ * (u_los.z() + config_.los_z_err_ff_limit_);
+    if (u_los.z() > config_.los_z_err_ff_limit) {
+      az_pn_ff = config_.los_z_ff * (u_los.z() - config_.los_z_err_ff_limit);
+    } else if (u_los.z() < -config_.los_z_err_ff_limit) {
+      az_pn_ff = config_.los_z_ff * (u_los.z() + config_.los_z_err_ff_limit);
     }
-    az_pn_ff = clamp_(az_pn_ff, -config_.los_z_ff_limit_, config_.los_z_ff_limit_);
+    az_pn_ff = clamp_(az_pn_ff, -config_.los_z_ff_limit, config_.los_z_ff_limit);
   }
   
   // PI контроль
-  double a_pn_y = ay_pn_ff + config_.los_y_kp_ * Vc * los_err_y + los_err_int_y_;
-  double a_pn_z = az_pn_ff + config_.los_z_kp_ * Vc * los_err_z + los_err_int_z_;
+  double a_pn_y = ay_pn_ff + config_.los_y_kp * Vc * los_err_y + los_err_int_y_;
+  double a_pn_z = az_pn_ff + config_.los_z_kp * Vc * los_err_z + los_err_int_z_;
   
   // Ограничение
-  a_pn_y = clamp_(a_pn_y, -config_.max_lat_acc_, config_.max_lat_acc_);
-  a_pn_z = clamp_(a_pn_z, config_.max_up_acc_, config_.max_down_acc_);
+  a_pn_y = clamp_(a_pn_y, -config_.max_lat_acc, config_.max_lat_acc);
+  a_pn_z = clamp_(a_pn_z, config_.max_up_acc, config_.max_down_acc);
   
   // Сохранение отладки
   debug_info_.los_y_ff = ay_pn_ff;
   debug_info_.los_z_ff = az_pn_ff;
-  debug_info_.los_y_kp = config_.los_y_kp_ * Vc * los_err_y;
-  debug_info_.los_z_kp = config_.los_z_kp_ * Vc * los_err_z;
+  debug_info_.los_y_kp = config_.los_y_kp * Vc * los_err_y;
+  debug_info_.los_z_kp = config_.los_z_kp * Vc * los_err_z;
   debug_info_.los_y_int = los_err_int_y_;
   debug_info_.los_z_int = los_err_int_z_;
   debug_info_.los_err_y = los_err_y;
@@ -319,21 +319,21 @@ Eigen::Vector3d GuidanceController::computeInterceptPI_(
   double los_err_y = los_err.y();
   
   // Интеграл с anti-windup (X axis)
-  if (!((intercept_x_int_ >= config_.intercept_int_limit_ && los_err_x > 0.0) ||
-        (intercept_x_int_ <= -config_.intercept_int_limit_ && los_err_x < 0.0))) {
-    intercept_x_int_ += config_.intercept_ki_ * los_err_x * dt;
+  if (!((intercept_x_int_ >= config_.intercept_int_limit && los_err_x > 0.0) ||
+        (intercept_x_int_ <= -config_.intercept_int_limit && los_err_x < 0.0))) {
+    intercept_x_int_ += config_.intercept_ki * los_err_x * dt;
   }
   
   // Интеграл с anti-windup (Y axis)
-  if (!((intercept_y_int_ >= config_.intercept_int_limit_ && los_err_y > 0.0) ||
-        (intercept_y_int_ <= -config_.intercept_int_limit_ && los_err_y < 0.0))) {
-    intercept_y_int_ += config_.intercept_ki_ * los_err_y * dt;
+  if (!((intercept_y_int_ >= config_.intercept_int_limit && los_err_y > 0.0) ||
+        (intercept_y_int_ <= -config_.intercept_int_limit && los_err_y < 0.0))) {
+    intercept_y_int_ += config_.intercept_ki * los_err_y * dt;
   }
   
   // PI контроль
-  double a_pn_x = config_.intercept_kp_ * Vc * los_err_x + intercept_x_int_;
-  double a_pn_y = config_.intercept_kp_ * Vc * los_err_y + intercept_y_int_;
-  double a_pn_z = config_.intercept_z_kp_ * u_los.z();
+  double a_pn_x = config_.intercept_kp * Vc * los_err_x + intercept_x_int_;
+  double a_pn_y = config_.intercept_kp * Vc * los_err_y + intercept_y_int_;
+  double a_pn_z = config_.intercept_z_kp * u_los.z();
   
   Eigen::Vector3d a_pn{a_pn_x, a_pn_y, a_pn_z};
   return a_pn;
@@ -348,14 +348,14 @@ Eigen::Vector3d GuidanceController::computeInterceptPI_(
   double los_err_y = u_los.y();
   
   // Интеграл с anti-windup
-  if (!((intercept_x_int_ >= config_.intercept_int_limit_ && los_err_x > 0.0) ||
-        (intercept_x_int_ <= -config_.intercept_int_limit_ && los_err_x < 0.0))) {
-    intercept_x_int_ += config_.intercept_ki_ * los_err_x * dt;
+  if (!((intercept_x_int_ >= config_.intercept_int_limit && los_err_x > 0.0) ||
+        (intercept_x_int_ <= -config_.intercept_int_limit && los_err_x < 0.0))) {
+    intercept_x_int_ += config_.intercept_ki * los_err_x * dt;
   }
   
-  if (!((intercept_y_int_ >= config_.intercept_int_limit_ && los_err_y > 0.0) ||
-        (intercept_y_int_ <= -config_.intercept_int_limit_ && los_err_y < 0.0))) {
-    intercept_y_int_ += config_.intercept_ki_ * los_err_y * dt;
+  if (!((intercept_y_int_ >= config_.intercept_int_limit && los_err_y > 0.0) ||
+        (intercept_y_int_ <= -config_.intercept_int_limit && los_err_y < 0.0))) {
+    intercept_y_int_ += config_.intercept_ki * los_err_y * dt;
   }
   
   // Производная
@@ -365,17 +365,17 @@ Eigen::Vector3d GuidanceController::computeInterceptPI_(
   intercept_los_err_y_prev_ = los_err_y;
   
   // Фильтрация производной
-  intercept_x_d_flt_ = (1.0 - config_.intercept_acc_alpha_) * intercept_x_d_flt_ +
-                       config_.intercept_acc_alpha_ * intercept_x_d;
-  intercept_y_d_flt_ = (1.0 - config_.intercept_acc_alpha_) * intercept_y_d_flt_ +
-                       config_.intercept_acc_alpha_ * intercept_y_d;
+  intercept_x_d_flt_ = (1.0 - config_.intercept_acc_alpha) * intercept_x_d_flt_ +
+                       config_.intercept_acc_alpha * intercept_x_d;
+  intercept_y_d_flt_ = (1.0 - config_.intercept_acc_alpha) * intercept_y_d_flt_ +
+                       config_.intercept_acc_alpha * intercept_y_d;
   
   // PID контроль
-  double pn_vx = config_.intercept_kp_ * los_err_x + intercept_x_int_ +
-                 config_.intercept_kd_ * intercept_x_d_flt_;
-  double pn_vy = config_.intercept_kp_ * los_err_y + intercept_y_int_ +
-                 config_.intercept_kd_ * intercept_y_d_flt_;
-  double a_pn_z = config_.intercept_z_kp_ * u_los.z();
+  double pn_vx = config_.intercept_kp * los_err_x + intercept_x_int_ +
+                 config_.intercept_kd * intercept_x_d_flt_;
+  double pn_vy = config_.intercept_kp * los_err_y + intercept_y_int_ +
+                 config_.intercept_kd * intercept_y_d_flt_;
+  double a_pn_z = config_.intercept_z_kp * u_los.z();
   
   // ADRC для сглаживания
   double a_pn_x = 0.0;
@@ -399,9 +399,9 @@ Eigen::Vector3d GuidanceController::computeInterceptPI_(
 
 Eigen::Vector3d GuidanceController::clampAcceleration_(const Eigen::Vector3d& acc) {
   Eigen::Vector3d acc_clamped;
-  acc_clamped.x() = clamp_(acc.x(), -config_.max_hor_acc_, config_.max_hor_acc_);
-  acc_clamped.y() = clamp_(acc.y(), -config_.max_hor_acc_, config_.max_hor_acc_);
-  acc_clamped.z() = clamp_(acc.z(), config_.max_up_acc_, config_.max_down_acc_);
+  acc_clamped.x() = clamp_(acc.x(), -config_.max_hor_acc, config_.max_hor_acc);
+  acc_clamped.y() = clamp_(acc.y(), -config_.max_hor_acc, config_.max_hor_acc);
+  acc_clamped.z() = clamp_(acc.z(), config_.max_up_acc, config_.max_down_acc);
   return acc_clamped;
 }
 
@@ -412,9 +412,9 @@ Eigen::Vector3d GuidanceController::addParallelAcceleration_(
   double dt
 ) {
   // Parallel acceleration для увеличения Vc
-  double acc_parallel = config_.acc_parallel_gain_ * (config_.max_vc_ - Vc);
-  acc_parallel = acc_parallel_pre_ + config_.acc_parallel_alpha_ * (acc_parallel - acc_parallel_pre_);
-  acc_parallel = clamp_(acc_parallel, 0.0, config_.max_acc_parallel_);
+  double acc_parallel = config_.acc_parallel_gain * (config_.max_vc - Vc);
+  acc_parallel = acc_parallel_pre_ + config_.acc_parallel_alpha * (acc_parallel - acc_parallel_pre_);
+  acc_parallel = clamp_(acc_parallel, 0.0, config_.max_acc_parallel);
   acc_parallel_pre_ = acc_parallel;
   
   debug_info_.acc_parallel = acc_parallel;
@@ -436,8 +436,8 @@ Eigen::Vector3d GuidanceController::transformAccToNav_(
 }
 
 void GuidanceController::initADRC_() {
-  adrc_intercept_ax_td_.init_td_params(config_.adrc_r_, config_.adrc_h_, config_.adrc_n_);
-  adrc_intercept_ay_td_.init_td_params(config_.adrc_r_, config_.adrc_h_, config_.adrc_n_);
+  adrc_intercept_ax_td_.init_td_params(config_.adrc_r, config_.adrc_h, config_.adrc_n);
+  adrc_intercept_ay_td_.init_td_params(config_.adrc_r, config_.adrc_h, config_.adrc_n);
   adrc_initialized_ = true;
 }
 

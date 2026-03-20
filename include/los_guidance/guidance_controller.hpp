@@ -114,6 +114,8 @@ struct GuidanceDebug {
   double los_z_kp{0.0};
   double los_y_int{0.0};
   double los_z_int{0.0};
+  double los_err_y{0.0};     
+  double los_err_z{0.0};     
   double vc_estimate{0.0};
   double acc_parallel{0.0};
 };

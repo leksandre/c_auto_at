@@ -309,8 +309,8 @@ private:
   static constexpr uint8_t PX4_CUSTOM_MAIN_MODE_STABILIZED = 7;
   
   static constexpr uint8_t VEHICLE_CMD_DO_SET_MODE = 176;
-  static constexpr uint8_t VEHICLE_CMD_COMPONENT_ARM_DISARM = 400;
-  
+//   static constexpr uint8_t VEHICLE_CMD_COMPONENT_ARM_DISARM = 400;
+  static constexpr uint16_t VEHICLE_CMD_COMPONENT_ARM_DISARM = 400;
   // === Внутренние методы ===
   
   /**

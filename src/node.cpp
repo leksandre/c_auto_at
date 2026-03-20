@@ -391,7 +391,8 @@ void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) 
     const Eigen::Matrix3d R = quat.toRotationMatrix();
     const double roll = std::atan2(R(2, 1), R(2, 2));
     const double pitch = std::asin(-R(2, 0));
-    
+    const double yaw = std::atan2(R(1, 0), R(0, 0)); 
+
     // Матрица вращения nav → body
     Eigen::Matrix3d R_nb = quat.toRotationMatrix();
     
@@ -405,7 +406,7 @@ void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) 
     
     if (target.is_valid) {
       // 🎯 Обновление Kalman Filter
-      los_estimator_->predict(config_.update_ms / 1000.0, omega_b);
+      los_estimator_->predict(config_.update_ms / 1000.0, omega_b, R_nb);
       los_estimator_->update(target.los_nav);
       
       // 🎯 Получение оценённых LOS и lambda
@@ -413,13 +414,17 @@ void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) 
       Eigen::Vector3d lambda = los_estimator_->getLosAngularVelocity();
       
       // 🎯 Расчёт ускорения через GuidanceController
-      double Vc = guidance_ctrl_->estimateVc(pitch, config_.max_tilt_deg * DEG2RAD);
-      Eigen::Vector3d acc_cmd = guidance_ctrl_->computeAcceleration(
+      // double Vc = guidance_ctrl_->estimateVc(pitch, config_.max_tilt_deg * DEG2RAD);
+
+
+
+      GuidanceOutput output = guidance_ctrl_->computeAcceleration(
         u_los,
         lambda,
-        Vc,
-        config_.update_ms / 1000.0
+        pitch,    // ← 3-й параметр pitch_rad, не Vc!
+        yaw
       );
+      Eigen::Vector3d acc_cmd = output.acceleration_cmd;
       
       // 🎯 Публикация статуса для отладки
       publishLosStatus(target, acc_cmd);
@@ -427,7 +432,7 @@ void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) 
       // Сохранение команды для timer callback
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        guidance_ctrl_->setLastAccelerationCommand(acc_cmd);
+        // guidance_ctrl_->setLastAccelerationCommand(acc_cmd);
         attack_ready_ = true;
       }
     }
@@ -456,9 +461,14 @@ void Node::trackBBox2DCallback(vision_msgs::msg::Detection2D::SharedPtr msg) {
   }
   
   if (quat_ready && gyro_ready) {
+
+    // Конвертация quaternion → euler
     const Eigen::Matrix3d R = quat.toRotationMatrix();
     const double roll = std::atan2(R(2, 1), R(2, 2));
     const double pitch = std::asin(-R(2, 0));
+    const double yaw = std::atan2(R(1, 0), R(0, 0)); 
+
+    // Матрица вращения nav → body
     Eigen::Matrix3d R_nb = quat.toRotationMatrix();
     
     TargetInfo target = target_tracker_->processDetection2D(
@@ -468,29 +478,52 @@ void Node::trackBBox2DCallback(vision_msgs::msg::Detection2D::SharedPtr msg) {
       R_nb
     );
     
+    // if (target.is_valid) {
+    //   // los_estimator_->predict(config_.update_ms / 1000.0, omega_b);
+    //   los_estimator_->predict(config_.update_ms / 1000.0, omega_b, R_nb);
+    //   los_estimator_->update(target.los_nav);
+      
+    //   Eigen::Vector3d u_los = los_estimator_->getLosVector();
+    //   Eigen::Vector3d lambda = los_estimator_->getLosAngularVelocity();
+      
+    //   // double Vc = guidance_ctrl_->estimateVc(pitch, config_.max_tilt_deg * DEG2RAD);
+    //   double Vc = guidance_ctrl_->estimateVcFromPitch(pitch, config_.max_tilt_deg * DEG2RAD);
+
+      
+    //   publishLosStatus(target, acc_cmd);
+      
+    //   {
+    //     std::lock_guard<std::mutex> lock(state_mutex_);
+    //     // guidance_ctrl_->setLastAccelerationCommand(acc_cmd);
+    //     attack_ready_ = true;
+    //   }
+    // }
+
     if (target.is_valid) {
-      los_estimator_->predict(config_.update_ms / 1000.0, omega_b);
+      los_estimator_->predict(config_.update_ms / 1000.0, omega_b, R_nb);
       los_estimator_->update(target.los_nav);
       
       Eigen::Vector3d u_los = los_estimator_->getLosVector();
       Eigen::Vector3d lambda = los_estimator_->getLosAngularVelocity();
       
-      double Vc = guidance_ctrl_->estimateVc(pitch, config_.max_tilt_deg * DEG2RAD);
-      Eigen::Vector3d acc_cmd = guidance_ctrl_->computeAcceleration(
+      // 🎯 Расчёт ускорения через GuidanceController
+      GuidanceOutput output = guidance_ctrl_->computeAcceleration(
         u_los,
         lambda,
-        Vc,
-        config_.update_ms / 1000.0
+        pitch,
+        yaw 
       );
+      Eigen::Vector3d acc_cmd = output.acceleration_cmd;  // ← Получить из output
       
       publishLosStatus(target, acc_cmd);
       
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        guidance_ctrl_->setLastAccelerationCommand(acc_cmd);
         attack_ready_ = true;
       }
     }
+
+
   }
 }
 
