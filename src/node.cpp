@@ -1,0 +1,613 @@
+/**
+ * @file node.cpp
+ * @brief Реализация главного ROS2 узла системы наведения LOS
+ * @note Этот файл содержит только оркестрацию, вся логика в контроллерах
+ * 
+ * @author Snow Pang, ssnowpang@gmail.com
+ * @date 2025-09
+ * @copyright BSD 3-Clause License
+ */
+
+#include <los_guidance/node.hpp>
+#include <Eigen/Geometry>
+
+namespace los_guidance {
+
+// ============================================================================
+// Конструктор
+// ============================================================================
+
+Node::Node() : rclcpp::Node("los_guidance_node") {
+  RCLCPP_INFO(this->get_logger(), "Initializing LOS Guidance Node...");
+  
+  // 1. Загрузка параметров из YAML
+  loadParameters();
+  
+  // 2. Инициализация контроллеров
+  initializeControllers();
+  
+  // 3. Создание publishers/subscribers/services
+  createPublishers();
+  createSubscribers();
+  createServices();
+  
+  // 4. Создание таймера основного цикла
+  timer_ = this->create_wall_timer(
+    std::chrono::milliseconds(config_.update_ms),
+    std::bind(&Node::controlLoopTimerCallback, this)
+  );
+  
+  RCLCPP_INFO(this->get_logger(), "LOS Guidance Node initialized successfully");
+}
+
+// ============================================================================
+// Инициализация
+// ============================================================================
+
+void Node::loadParameters() {
+  RCLCPP_INFO(this->get_logger(), "Loading parameters...");
+  
+  // === Таймеры ===
+  this->declare_parameter("timer.update_ms", 20);
+  config_.update_ms = this->get_parameter("timer.update_ms").as_int();
+  
+  // === Камера ===
+  this->declare_parameter("camera.fx", 410.0);
+  this->declare_parameter("camera.fy", 410.0);
+  this->declare_parameter("camera.cx", 640.0);
+  this->declare_parameter("camera.cy", 360.0);
+  this->declare_parameter("camera.vertical_fov_deg", 60.0);
+  
+  config_.camera_fx = this->get_parameter("camera.fx").as_double();
+  config_.camera_fy = this->get_parameter("camera.fy").as_double();
+  config_.camera_cx = this->get_parameter("camera.cx").as_double();
+  config_.camera_cy = this->get_parameter("camera.cy").as_double();
+  config_.vertical_fov_deg = this->get_parameter("camera.vertical_fov_deg").as_double();
+  
+  // === Установка камеры ===
+  this->declare_parameter("camera.install.roll_deg", 0.0);
+  this->declare_parameter("camera.install.pitch_deg", 5.0);
+  this->declare_parameter("camera.install.yaw_deg", 0.0);
+  
+  config_.cam_install_roll_deg = this->get_parameter("camera.install.roll_deg").as_double();
+  config_.cam_install_pitch_deg = this->get_parameter("camera.install.pitch_deg").as_double();
+  config_.cam_install_yaw_deg = this->get_parameter("camera.install.yaw_deg").as_double();
+  
+  // === Режимы ===
+  this->declare_parameter("guidance.enable_PI_control", false);
+  this->declare_parameter("guidance.top_attack_mode", false);
+  this->declare_parameter("guidance.enable_acceleration_parallel", false);
+  this->declare_parameter("kalman.use_gyro_compensation", false);
+  this->declare_parameter("sync.debug", false);
+  
+  config_.enable_PI_control = this->get_parameter("guidance.enable_PI_control").as_bool();
+  config_.top_attack_enable = this->get_parameter("guidance.top_attack_mode").as_bool();
+  config_.enable_acc_parallel = this->get_parameter("guidance.enable_acceleration_parallel").as_bool();
+  config_.use_gyro_comp = this->get_parameter("kalman.use_gyro_compensation").as_bool();
+  config_.debug = this->get_parameter("sync.debug").as_bool();
+  
+  // === Ограничения ===
+  this->declare_parameter("guidance.max_tilt_deg", 45.0);
+  this->declare_parameter("guidance.min_tilt_deg", 5.0);
+  this->declare_parameter("acceleration.max_lateral_mps2", 3.0);
+  this->declare_parameter("acceleration.max_vertical_up_mps2", -5.0);
+  this->declare_parameter("acceleration.max_vertical_down_mps2", 5.0);
+  this->declare_parameter("acceleration.max_horizontal_mps2", 12.0);
+  
+  config_.max_tilt_deg = this->get_parameter("guidance.max_tilt_deg").as_double();
+  config_.min_tilt_deg = this->get_parameter("guidance.min_tilt_deg").as_double();
+  config_.max_lat_acc = this->get_parameter("acceleration.max_lateral_mps2").as_double();
+  config_.max_up_acc = this->get_parameter("acceleration.max_vertical_up_mps2").as_double();
+  config_.max_down_acc = this->get_parameter("acceleration.max_vertical_down_mps2").as_double();
+  config_.max_vert_acc_limit = this->get_parameter("acceleration.max_horizontal_mps2").as_double();
+  config_.max_hor_acc_limit = this->get_parameter("acceleration.max_horizontal_mps2").as_double();
+  
+  // === Скорость ===
+  this->declare_parameter("velocity.min_vc_mps", 1.0);
+  this->declare_parameter("velocity.max_vc_mps", 20.0);
+  this->declare_parameter("velocity.vc_alpha_smooth", 0.1);
+  
+  config_.min_vc = this->get_parameter("velocity.min_vc_mps").as_double();
+  config_.max_vc = this->get_parameter("velocity.max_vc_mps").as_double();
+  config_.vc_alpha = this->get_parameter("velocity.vc_alpha_smooth").as_double();
+  
+  // === PN параметры ===
+  this->declare_parameter("guidance.pn_gain_N", 3.0);
+  this->declare_parameter("acceleration.apn_alpha", 0.1);
+  this->declare_parameter("acceleration.ax_rate_limit_mps3", 1.0);
+  
+  config_.N_gain = this->get_parameter("guidance.pn_gain_N").as_double();
+  config_.apn_alpha = this->get_parameter("acceleration.apn_alpha").as_double();
+  config_.ax_rate_limit = this->get_parameter("acceleration.ax_rate_limit_mps3").as_double();
+  
+  // === Parallel acceleration ===
+  this->declare_parameter("acceleration.parallel.enable", false);
+  this->declare_parameter("acceleration.parallel.gain", 0.1);
+  this->declare_parameter("acceleration.parallel.alpha", 0.1);
+  this->declare_parameter("acceleration.parallel.max_mps2", 2.0);
+  
+  config_.enable_acc_parallel = this->get_parameter("acceleration.parallel.enable").as_bool();
+  config_.acc_parallel_gain = this->get_parameter("acceleration.parallel.gain").as_double();
+  config_.acc_parallel_alpha = this->get_parameter("acceleration.parallel.alpha").as_double();
+  config_.max_acc_parallel = this->get_parameter("acceleration.parallel.max_mps2").as_double();
+  
+  // === PI LOS параметры (Y) ===
+  this->declare_parameter("los_pi.y.kp", 3.0);
+  this->declare_parameter("los_pi.y.ki", 0.01);
+  this->declare_parameter("los_pi.y.ff_enable", false);
+  this->declare_parameter("los_pi.y.ff_gain", 7.0);
+  this->declare_parameter("los_pi.y.ff_limit", 3.0);
+  this->declare_parameter("los_pi.y.err_ff_limit", 0.1);
+  this->declare_parameter("los_pi.y.int_limit", 3.0);
+  
+  config_.los_y_kp = this->get_parameter("los_pi.y.kp").as_double();
+  config_.los_y_ki = this->get_parameter("los_pi.y.ki").as_double();
+  config_.los_y_ff_enable = this->get_parameter("los_pi.y.ff_enable").as_bool();
+  config_.los_y_ff = this->get_parameter("los_pi.y.ff_gain").as_double();
+  config_.los_y_ff_limit = this->get_parameter("los_pi.y.ff_limit").as_double();
+  config_.los_y_err_ff_limit = this->get_parameter("los_pi.y.err_ff_limit").as_double();
+  config_.los_y_int_limit = this->get_parameter("los_pi.y.int_limit").as_double();
+  
+  // === PI LOS параметры (Z) ===
+  this->declare_parameter("los_pi.z.kp", 3.0);
+  this->declare_parameter("los_pi.z.ki", 0.01);
+  this->declare_parameter("los_pi.z.ff_enable", false);
+  this->declare_parameter("los_pi.z.ff_gain", 7.0);
+  this->declare_parameter("los_pi.z.ff_limit", 3.0);
+  this->declare_parameter("los_pi.z.err_ff_limit", 0.1);
+  this->declare_parameter("los_pi.z.int_limit", 5.0);
+  
+  config_.los_z_kp = this->get_parameter("los_pi.z.kp").as_double();
+  config_.los_z_ki = this->get_parameter("los_pi.z.ki").as_double();
+  config_.los_z_ff_enable = this->get_parameter("los_pi.z.ff_enable").as_bool();
+  config_.los_z_ff = this->get_parameter("los_pi.z.ff_gain").as_double();
+  config_.los_z_ff_limit = this->get_parameter("los_pi.z.ff_limit").as_double();
+  config_.los_z_err_ff_limit = this->get_parameter("los_pi.z.err_ff_limit").as_double();
+  config_.los_z_int_limit = this->get_parameter("los_pi.z.int_limit").as_double();
+  
+  // === Intercept параметры ===
+  this->declare_parameter("intercept.kp", 3.0);
+  this->declare_parameter("intercept.ki", 0.01);
+  this->declare_parameter("intercept.kd", 0.01);
+  this->declare_parameter("intercept.int_limit", 1.0);
+  this->declare_parameter("intercept.z_kp", 5.0);
+  this->declare_parameter("intercept.acc_alpha", 0.1);
+  
+  config_.intercept_kp = this->get_parameter("intercept.kp").as_double();
+  config_.intercept_ki = this->get_parameter("intercept.ki").as_double();
+  config_.intercept_kd = this->get_parameter("intercept.kd").as_double();
+  config_.intercept_int_limit = this->get_parameter("intercept.int_limit").as_double();
+  config_.intercept_z_kp = this->get_parameter("intercept.z_kp").as_double();
+  config_.intercept_acc_alpha = this->get_parameter("intercept.acc_alpha").as_double();
+  
+  // === Kalman Filter параметры ===
+  this->declare_parameter("kalman.los_process_noise_Q", 0.01);
+  this->declare_parameter("kalman.los_measurement_noise_R", 0.1);
+  
+  config_.KF_los_vec_Q = this->get_parameter("kalman.los_process_noise_Q").as_double();
+  config_.KF_los_vec_R = this->get_parameter("kalman.los_measurement_noise_R").as_double();
+  
+  // === ADRC параметры ===
+  this->declare_parameter("adrc.td_r", 1000.0);
+  this->declare_parameter("adrc.td_h", 0.01);
+  this->declare_parameter("adrc.td_n", 2);
+  
+  config_.adrc_r = this->get_parameter("adrc.td_r").as_double();
+  config_.adrc_h = this->get_parameter("adrc.td_h").as_double();
+  config_.adrc_n = this->get_parameter("adrc.td_n").as_double();
+  
+  // === Sync параметры ===
+  this->declare_parameter("sync.buffer_size", 100);
+  this->declare_parameter("sync.retention_us", 200000);
+  
+  config_.sync_buffer_size = this->get_parameter("sync.buffer_size").as_int();
+  config_.sync_retention_us = this->get_parameter("sync.retention_us").as_int();
+  
+  RCLCPP_INFO(this->get_logger(), "Parameters loaded successfully");
+}
+
+void Node::initializeControllers() {
+  RCLCPP_INFO(this->get_logger(), "Initializing controllers...");
+  
+  // === 1. Tracker Config ===
+  tracker_config_.fx = config_.camera_fx;
+  tracker_config_.fy = config_.camera_fy;
+  tracker_config_.cx = config_.camera_cx;
+  tracker_config_.cy = config_.camera_cy;
+  tracker_config_.vertical_fov_deg = config_.vertical_fov_deg;
+  tracker_config_.install_roll_deg = config_.cam_install_roll_deg;
+  tracker_config_.install_pitch_deg = config_.cam_install_pitch_deg;
+  tracker_config_.install_yaw_deg = config_.cam_install_yaw_deg;
+  tracker_config_.pixel_smooth_alpha = 0.3;  // Можно вынести в конфиг
+  tracker_config_.los_smooth_alpha = 0.1;    // Можно вынести в конфиг
+  tracker_config_.min_confidence = 0.5;      // Можно вынести в конфиг
+  
+  target_tracker_ = std::make_unique<TargetTracker>(tracker_config_);
+  
+  // === 2. Los Estimator Config ===
+  los_config_.process_noise_Q = config_.KF_los_vec_Q;
+  los_config_.measurement_noise_R = config_.KF_los_vec_R;
+  los_config_.use_gyro_compensation = config_.use_gyro_comp;
+  
+  los_estimator_ = std::make_unique<LosEstimator>(los_config_);
+  
+  // === 3. Guidance Config ===
+  guidance_config_.pn_gain_N = config_.N_gain;
+  guidance_config_.los_y_kp = config_.los_y_kp;
+  guidance_config_.los_y_ki = config_.los_y_ki;
+  guidance_config_.los_y_ff_enable = config_.los_y_ff_enable;
+  guidance_config_.los_y_ff = config_.los_y_ff;
+  guidance_config_.los_y_ff_limit = config_.los_y_ff_limit;
+  guidance_config_.los_y_int_limit = config_.los_y_int_limit;
+  guidance_config_.los_z_kp = config_.los_z_kp;
+  guidance_config_.los_z_ki = config_.los_z_ki;
+  guidance_config_.los_z_ff_enable = config_.los_z_ff_enable;
+  guidance_config_.los_z_ff = config_.los_z_ff;
+  guidance_config_.los_z_ff_limit = config_.los_z_ff_limit;
+  guidance_config_.los_z_int_limit = config_.los_z_int_limit;
+  guidance_config_.intercept_kp = config_.intercept_kp;
+  guidance_config_.intercept_ki = config_.intercept_ki;
+  guidance_config_.intercept_kd = config_.intercept_kd;
+  guidance_config_.intercept_int_limit = config_.intercept_int_limit;
+  guidance_config_.intercept_z_kp = config_.intercept_z_kp;
+  guidance_config_.max_lat_acc = config_.max_lat_acc;
+  guidance_config_.max_up_acc = config_.max_up_acc;
+  guidance_config_.max_down_acc = config_.max_down_acc;
+  guidance_config_.enable_PI_control = config_.enable_PI_control;
+  guidance_config_.top_attack_mode = config_.top_attack_enable;
+  guidance_config_.enable_acc_parallel = config_.enable_acc_parallel;
+  guidance_config_.max_hor_acc = config_.max_hor_acc_limit;
+  
+  guidance_ctrl_ = std::make_unique<GuidanceController>(
+    guidance_config_,
+    config_.update_ms / 1000.0  // dt в секундах
+  );
+  
+  // === 4. Vehicle Controller ===
+  vehicle_ctrl_ = std::make_unique<VehicleController>(shared_from_this());
+  
+  // === 5. Sensor Sync ===
+  sync_config_.buffer_size = config_.sync_buffer_size;
+  sync_config_.retention_us = config_.sync_retention_us;
+  sync_config_.debug = config_.debug;
+  
+  sensor_sync_ = std::make_unique<SensorSync>(sync_config_);
+  sensor_sync_->registerSource(att_sync_key_);
+  sensor_sync_->registerSource(ang_rate_sync_key_);
+  
+  if (config_.debug) {
+    sensor_sync_->setDebug(true);
+  }
+  
+  RCLCPP_INFO(this->get_logger(), "Controllers initialized successfully");
+}
+
+void Node::createPublishers() {
+  RCLCPP_INFO(this->get_logger(), "Creating publishers...");
+  
+  vehicle_cmd_pub_ = this->create_publisher<px4_msgs::msg::VehicleCommand>(
+    "fmu/in/vehicle_command", 10);
+  
+  offboard_ctrl_mode_pub_ = this->create_publisher<px4_msgs::msg::OffboardControlMode>(
+    "fmu/in/offboard_control_mode", 10);
+  
+  trajectory_setpoint_pub_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>(
+    "fmu/in/trajectory_setpoint", 10);
+  
+  los_status_pub_ = this->create_publisher<px4_msgs::msg::VehicleLosStatus>(
+    "fmu/in/vehicle_los_status", 10);
+  
+  los_intercept_debug_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>(
+    "los_intercept_debug", 10);
+  
+  RCLCPP_INFO(this->get_logger(), "Publishers created successfully");
+}
+
+void Node::createSubscribers() {
+  RCLCPP_INFO(this->get_logger(), "Creating subscribers...");
+  
+  // QoS для PX4 сообщений (sensor_data)
+  rmw_qos_profile_t qos_profile = rmw_qos_profile_sensor_data;
+  auto qos = rclcpp::QoS(rclcpp::QoSInitialization(qos_profile.history, 5), qos_profile);
+  
+  vehicle_status_sub_ = this->create_subscription<px4_msgs::msg::VehicleStatus>(
+    "fmu/out/vehicle_status",
+    qos,
+    std::bind(&Node::vehicleStatusCallback, this, std::placeholders::_1)
+  );
+  
+  attack_signal_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+    "/attack_signal",
+    10,
+    std::bind(&Node::attackSignalCallback, this, std::placeholders::_1)
+  );
+  
+  tracker_result_sub_ = this->create_subscription<ai_service::msg::TrackerResult>(
+    "tracker_result",
+    10,
+    std::bind(&Node::trackerResultCallback, this, std::placeholders::_1)
+  );
+  
+  track_bbox_sub_ = this->create_subscription<vision_msgs::msg::Detection2D>(
+    "track_bbox",
+    10,
+    std::bind(&Node::trackBBox2DCallback, this, std::placeholders::_1)
+  );
+  
+  vehicle_attitude_sub_ = this->create_subscription<px4_msgs::msg::VehicleAttitude>(
+    "fmu/out/vehicle_attitude",
+    qos,
+    std::bind(&Node::vehicleAttitudeCallback, this, std::placeholders::_1)
+  );
+  
+  vehicle_angular_velocity_sub_ = this->create_subscription<px4_msgs::msg::VehicleAngularVelocity>(
+    "fmu/out/vehicle_angular_velocity",
+    qos,
+    std::bind(&Node::vehicleAngularVelocityCallback, this, std::placeholders::_1)
+  );
+  
+  RCLCPP_INFO(this->get_logger(), "Subscribers created successfully");
+}
+
+void Node::createServices() {
+  RCLCPP_INFO(this->get_logger(), "Creating services...");
+  
+  auto_attack_srv_ = this->create_service<std_srvs::srv::SetBool>(
+    "auto_attack",
+    std::bind(&Node::autoAttackService, this,
+      std::placeholders::_1, std::placeholders::_2)
+  );
+  
+  RCLCPP_INFO(this->get_logger(), "Services created successfully");
+}
+
+// ============================================================================
+// Callbacks
+// ============================================================================
+
+void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) {
+  uint64_t ref_us = msg->timestamp / 1000;  // ns → us
+  
+  // Синхронизация с attitude и gyro
+  auto sync_msg = sensor_sync_->sync(ref_us);
+  
+  Eigen::Quaterniond quat;
+  Eigen::Vector3d omega_b;
+  bool quat_ready = false;
+  bool gyro_ready = false;
+  
+  if (sync_msg[att_sync_key_]) {
+    quat = *std::static_pointer_cast<Eigen::Quaterniond>(sync_msg[att_sync_key_]);
+    quat_ready = true;
+  }
+  
+  if (sync_msg[ang_rate_sync_key_]) {
+    omega_b = *std::static_pointer_cast<Eigen::Vector3d>(sync_msg[ang_rate_sync_key_]);
+    gyro_ready = true;
+  }
+  
+  if (quat_ready && gyro_ready) {
+    // Конвертация quaternion → euler
+    const Eigen::Matrix3d R = quat.toRotationMatrix();
+    const double roll = std::atan2(R(2, 1), R(2, 2));
+    const double pitch = std::asin(-R(2, 0));
+    
+    // Матрица вращения nav → body
+    Eigen::Matrix3d R_nb = quat.toRotationMatrix();
+    
+    // 🎯 Обработка через TargetTracker
+    TargetInfo target = target_tracker_->processTrackerResult(
+      msg,
+      roll,
+      pitch,
+      R_nb
+    );
+    
+    if (target.is_valid) {
+      // 🎯 Обновление Kalman Filter
+      los_estimator_->predict(config_.update_ms / 1000.0, omega_b);
+      los_estimator_->update(target.los_nav);
+      
+      // 🎯 Получение оценённых LOS и lambda
+      Eigen::Vector3d u_los = los_estimator_->getLosVector();
+      Eigen::Vector3d lambda = los_estimator_->getLosAngularVelocity();
+      
+      // 🎯 Расчёт ускорения через GuidanceController
+      double Vc = guidance_ctrl_->estimateVc(pitch, config_.max_tilt_deg * DEG2RAD);
+      Eigen::Vector3d acc_cmd = guidance_ctrl_->computeAcceleration(
+        u_los,
+        lambda,
+        Vc,
+        config_.update_ms / 1000.0
+      );
+      
+      // 🎯 Публикация статуса для отладки
+      publishLosStatus(target, acc_cmd);
+      
+      // Сохранение команды для timer callback
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        guidance_ctrl_->setLastAccelerationCommand(acc_cmd);
+        attack_ready_ = true;
+      }
+    }
+  }
+}
+
+void Node::trackBBox2DCallback(vision_msgs::msg::Detection2D::SharedPtr msg) {
+  uint64_t ref_us = static_cast<uint64_t>(msg->header.stamp.sec * 1e6) +
+                    static_cast<uint64_t>(msg->header.stamp.nanosec * 1e-3);
+  
+  auto sync_msg = sensor_sync_->sync(ref_us);
+  
+  Eigen::Quaterniond quat;
+  Eigen::Vector3d omega_b;
+  bool quat_ready = false;
+  bool gyro_ready = false;
+  
+  if (sync_msg[att_sync_key_]) {
+    quat = *std::static_pointer_cast<Eigen::Quaterniond>(sync_msg[att_sync_key_]);
+    quat_ready = true;
+  }
+  
+  if (sync_msg[ang_rate_sync_key_]) {
+    omega_b = *std::static_pointer_cast<Eigen::Vector3d>(sync_msg[ang_rate_sync_key_]);
+    gyro_ready = true;
+  }
+  
+  if (quat_ready && gyro_ready) {
+    const Eigen::Matrix3d R = quat.toRotationMatrix();
+    const double roll = std::atan2(R(2, 1), R(2, 2));
+    const double pitch = std::asin(-R(2, 0));
+    Eigen::Matrix3d R_nb = quat.toRotationMatrix();
+    
+    TargetInfo target = target_tracker_->processDetection2D(
+      msg,
+      roll,
+      pitch,
+      R_nb
+    );
+    
+    if (target.is_valid) {
+      los_estimator_->predict(config_.update_ms / 1000.0, omega_b);
+      los_estimator_->update(target.los_nav);
+      
+      Eigen::Vector3d u_los = los_estimator_->getLosVector();
+      Eigen::Vector3d lambda = los_estimator_->getLosAngularVelocity();
+      
+      double Vc = guidance_ctrl_->estimateVc(pitch, config_.max_tilt_deg * DEG2RAD);
+      Eigen::Vector3d acc_cmd = guidance_ctrl_->computeAcceleration(
+        u_los,
+        lambda,
+        Vc,
+        config_.update_ms / 1000.0
+      );
+      
+      publishLosStatus(target, acc_cmd);
+      
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        guidance_ctrl_->setLastAccelerationCommand(acc_cmd);
+        attack_ready_ = true;
+      }
+    }
+  }
+}
+
+void Node::vehicleStatusCallback(px4_msgs::msg::VehicleStatus::SharedPtr msg) {
+  vehicle_ctrl_->updateStatus(msg);
+}
+
+void Node::vehicleAttitudeCallback(px4_msgs::msg::VehicleAttitude::SharedPtr msg) {
+  uint64_t timestamp = msg->timestamp;
+  Eigen::Quaterniond q(msg->q[0], msg->q[1], msg->q[2], msg->q[3]);
+  std::shared_ptr<Eigen::Quaterniond> q_ptr(new Eigen::Quaterniond(q));
+  sensor_sync_->addMessage(att_sync_key_, timestamp, q_ptr);
+}
+
+void Node::vehicleAngularVelocityCallback(
+  px4_msgs::msg::VehicleAngularVelocity::SharedPtr msg
+) {
+  uint64_t timestamp = msg->timestamp;
+  Eigen::Vector3d omega_b(msg->xyz[0], msg->xyz[1], msg->xyz[2]);
+  std::shared_ptr<Eigen::Vector3d> omega_b_ptr(new Eigen::Vector3d(omega_b));
+  sensor_sync_->addMessage(ang_rate_sync_key_, timestamp, omega_b_ptr);
+}
+
+void Node::attackSignalCallback(std_msgs::msg::Bool::SharedPtr msg) {
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  start_attack_ = msg->data;
+  RCLCPP_INFO(this->get_logger(), "Attack signal: %s", start_attack_ ? "START" : "STOP");
+}
+
+void Node::autoAttackService(
+  const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+  std::shared_ptr<std_srvs::srv::SetBool::Response> response
+) {
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  
+  if (attack_ready_) {
+    attack_enabled_ = request->data;
+    response->success = true;
+    response->message = attack_enabled_ ? "Auto attack START" : "Auto attack STOP";
+    RCLCPP_INFO(this->get_logger(), "%s", response->message.c_str());
+  } else {
+    attack_enabled_ = false;
+    response->success = false;
+    response->message = "Auto attack NOT READY";
+    RCLCPP_WARN(this->get_logger(), "%s", response->message.c_str());
+  }
+}
+
+// ============================================================================
+// Timer Callback (основной цикл)
+// ============================================================================
+
+void Node::controlLoopTimerCallback() {
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  
+  if (!attack_ready_) {
+    return;
+  }
+  
+  bool should_attack = (start_attack_ || attack_enabled_);
+  
+  if (should_attack) {
+    if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD) {
+      update_acc_setpoint_ = true;
+      vehicle_ctrl_->publishOffboardControlMode();
+      vehicle_ctrl_->publishAccelerationSetpoint(
+        guidance_ctrl_->getLastAccelerationCommand()
+      );
+    } else {
+      guidance_ctrl_->reset();
+      vehicle_ctrl_->publishOffboardControlMode();
+      vehicle_ctrl_->publishAccelerationSetpoint(
+        guidance_ctrl_->getLastAccelerationCommand()
+      );
+      vehicle_ctrl_->setOffboardMode();
+    }
+  } else {
+    if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD && update_acc_setpoint_) {
+      guidance_ctrl_->reset();
+      vehicle_ctrl_->setManualMode();
+      update_acc_setpoint_ = false;
+      RCLCPP_INFO(this->get_logger(), "Attack stopped, switched to MANUAL");
+    }
+  }
+}
+
+// ============================================================================
+// Вспомогательные методы
+// ============================================================================
+
+void Node::publishLosStatus(
+  const TargetInfo& target_info,
+  const Eigen::Vector3d& acc_command
+) {
+  px4_msgs::msg::VehicleLosStatus msg;
+  
+  msg.detect_cu = static_cast<float>(target_info.pixel_u);
+  msg.detect_cv = static_cast<float>(target_info.pixel_v);
+  msg.correct_cu = static_cast<float>(target_info.pixel_u_smooth);
+  msg.correct_cv = static_cast<float>(target_info.pixel_v_smooth);
+  msg.los_vc_x = static_cast<float>(target_info.los_cam.x());
+  msg.los_vc_y = static_cast<float>(target_info.los_cam.y());
+  msg.los_vn_x_flt = static_cast<float>(target_info.los_nav.x());
+  msg.los_vn_y_flt = static_cast<float>(target_info.los_nav.y());
+  msg.los_vn_z_flt = static_cast<float>(target_info.los_nav.z());
+  msg.a_pn_x = static_cast<float>(acc_command.x());
+  msg.a_pn_y = static_cast<float>(acc_command.y());
+  msg.a_pn_z = static_cast<float>(acc_command.z());
+  msg.timestamp = target_info.timestamp_us;
+  
+  los_status_pub_->publish(msg);
+}
+
+void Node::publishInterceptDebug(const std::vector<float>& debug_data) {
+  std_msgs::msg::Float32MultiArray msg;
+  msg.data = debug_data;
+  los_intercept_debug_pub_->publish(msg);
+}
+
+} // namespace los_guidance

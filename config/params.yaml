@@ -1,0 +1,104 @@
+los_guidance_node:
+  ros__parameters:
+    # === Tracker ===
+    tracker:
+      # Камера
+      fx: 410.0
+      fy: 410.0
+      cx: 640.0
+      cy: 360.0
+      vertical_fov_deg: 60.0
+      
+      # Установка камеры
+      install:
+        roll_deg: 0.0
+        pitch_deg: 5.0
+        yaw_deg: 0.0
+      
+      # Фильтрация
+      pixel_smooth_alpha: 0.3
+      los_smooth_alpha: 0.1
+      min_confidence: 0.5
+      
+      # Координация
+      frame_id: "camera"
+      nav_frame_id: "ned"
+
+    # === Kalman Filter LOS ===
+    kalman:
+      los_process_noise_Q: 0.01
+      los_measurement_noise_R: 0.1
+      use_gyro_compensation: false
+
+    # === Наведение (Guidance) ===
+    guidance:
+      pn_gain_N: 3.0
+      max_tilt_deg: 45.0
+      min_tilt_deg: 5.0
+      enable_PI_control: false
+      enable_acceleration_parallel: false
+      top_attack_mode: false
+
+    # === Скорость (Vc estimation) ===
+    velocity:
+      min_vc_mps: 1.0
+      max_vc_mps: 20.0
+      vc_alpha_smooth: 0.1
+
+    # === PI контроллер LOS ===
+    los_pi:
+      y:
+        kp: 3.0
+        ki: 0.01
+        ff_enable: false
+        ff_gain: 7.0
+        ff_limit: 3.0
+        err_ff_limit: 0.1
+        int_limit: 3.0
+      z:
+        kp: 3.0
+        ki: 0.01
+        ff_enable: false
+        ff_gain: 7.0
+        ff_limit: 3.0
+        err_ff_limit: 0.1
+        int_limit: 5.0
+
+    # === Intercept алгоритм ===
+    intercept:
+      kp: 3.0
+      ki: 0.01
+      kd: 0.01
+      int_limit: 1.0
+      z_kp: 5.0
+      acc_alpha: 0.1
+
+    # === Ограничения ускорений ===
+    acceleration:
+      max_lateral_mps2: 3.0
+      max_vertical_up_mps2: -5.0
+      max_vertical_down_mps2: 5.0
+      max_horizontal_mps2: 12.0
+      ax_rate_limit_mps3: 1.0
+      apn_alpha: 0.1
+      parallel:
+        enable: false
+        gain: 0.1
+        alpha: 0.1
+        max_mps2: 2.0
+
+    # === ADRC ===
+    adrc:
+      td_r: 1000.0
+      td_h: 0.01
+      td_n: 2
+
+    # === Синхронизация ===
+    sync:
+      buffer_size: 100
+      retention_us: 200000
+      debug: false
+
+    # === Таймеры ===
+    timer:
+      update_ms: 20
