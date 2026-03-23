@@ -19,7 +19,7 @@ find_package(std_srvs REQUIRED)
 # find_package(message_filters REQUIRED)
 
 
-include_directories(
+include_directories(SYSTEM
   include
   ${Eigen3_INCLUDE_DIRS}
 )

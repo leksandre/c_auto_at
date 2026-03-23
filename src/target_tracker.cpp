@@ -86,7 +86,7 @@ TargetInfo TargetTracker::processTrackerResult(
   info.los_cam = u_c;
   
   // Camera → Nav
-  info.los_nav = camToNav_(u_c, R_bc_, R_nb);
+  info.los_nav = camToNav_(u_c,  R_nb);//R_bc_,
   
   // Сглаживание LOS вектора
   if (!los_initialized_) {
@@ -148,7 +148,7 @@ TargetInfo TargetTracker::processDetection2D(
   // Pixel → Camera → Nav
   Eigen::Vector3d u_c = pixelToCamVec_(u_correct, v_correct);
   info.los_cam = u_c;
-  info.los_nav = camToNav_(u_c, R_bc_, R_nb);
+  info.los_nav = camToNav_(u_c,  R_nb); //R_bc_,
   
   // Сглаживание LOS
   if (!los_initialized_) {
@@ -216,7 +216,7 @@ std::pair<double, double> TargetTracker::correctPixelRollPitch_(
 
 Eigen::Vector3d TargetTracker::camToNav_(
   const Eigen::Vector3d& u_c,
-  const Eigen::Matrix3d& R_bc,
+  // const Eigen::Matrix3d& R_bc,
   const Eigen::Matrix3d& R_nb
 ) {
   Eigen::Vector3d u_b = R_cb_ * u_c;      // camera → body

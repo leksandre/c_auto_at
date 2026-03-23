@@ -34,6 +34,8 @@ int main(int argc, char **argv) {
   // Используем shared_ptr для совместимости с Executor
   auto los_node = std::make_shared<los_guidance::Node>();
   
+  los_node->postConstruct();
+
   // === 3. Логирование старта ===
   RCLCPP_INFO(los_node->get_logger(), "===========================================");
   RCLCPP_INFO(los_node->get_logger(), "LOS Guidance Node Starting...");

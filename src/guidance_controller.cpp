@@ -240,6 +240,8 @@ void GuidanceController::setParallelAccEnabled(bool enable) {
 // Приватные методы
 // ============================================================================
 
+
+
 Eigen::Vector3d GuidanceController::computePnPI_(
   const Eigen::Vector3d& u_los,
   const Eigen::Vector3d& lambda,
@@ -263,18 +265,18 @@ Eigen::Vector3d GuidanceController::computePnPI_(
     los_err_int_z_ += config_.los_z_ki * los_err_z * dt;
   }
   
-  // Feedforward (Y axis)
+  // Feedforward (Y axis) ✅ ИСПРАВЛЕНО
   double ay_pn_ff = 0.0;
-  if (config_.los_y_ffenable) {
+  if (config_.los_y_ff_enable) {  // ← было los_y_ffenable
     if (u_los.y() > config_.los_y_err_ff_limit) {
       ay_pn_ff = config_.los_y_ff * (u_los.y() - config_.los_y_err_ff_limit);
     } else if (u_los.y() < -config_.los_y_err_ff_limit) {
       ay_pn_ff = config_.los_y_ff * (u_los.y() + config_.los_y_err_ff_limit);
     }
-    ay_pn_ff = clamp_(ay_pn_ff, -config_.los_y_fflimit, config_.los_y_fflimit_;
+    ay_pn_ff = clamp_(ay_pn_ff, -config_.los_y_ff_limit, config_.los_y_ff_limit);  // ← было los_y_fflimit
   }
   
-  // Feedforward (Z axis)
+  // Feedforward (Z axis) ✅ ИСПРАВЛЕНО
   double az_pn_ff = 0.0;
   if (config_.los_z_ff_enable) {
     if (u_los.z() > config_.los_z_err_ff_limit) {
@@ -282,7 +284,7 @@ Eigen::Vector3d GuidanceController::computePnPI_(
     } else if (u_los.z() < -config_.los_z_err_ff_limit) {
       az_pn_ff = config_.los_z_ff * (u_los.z() + config_.los_z_err_ff_limit);
     }
-    az_pn_ff = clamp_(az_pn_ff, -config_.los_z_fflimit, config_.los_z_fflimit);
+    az_pn_ff = clamp_(az_pn_ff, -config_.los_z_ff_limit, config_.los_z_ff_limit);  // ← было los_z_fflimit
   }
   
   // PI контроль
@@ -306,6 +308,11 @@ Eigen::Vector3d GuidanceController::computePnPI_(
   Eigen::Vector3d a_pn{0.0, a_pn_y, a_pn_z};
   return a_pn;
 }
+
+
+
+
+
 
 Eigen::Vector3d GuidanceController::computeInterceptPI_(
   const Eigen::Vector3d& u_los,

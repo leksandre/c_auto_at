@@ -91,14 +91,14 @@ los_guidance_node:
     adrc:
       td_r: 1000.0
       td_h: 0.01
-      td_n: 2
+      td_n: 2.0
 
     # === Синхронизация ===
     sync:
-      buffer_size: 100
-      retention_us: 200000
+      buffer_size: 100.0
+      retention_us: 200000.0
       debug: false
 
     # === Таймеры ===
     timer:
-      update_ms: 20
+      update_ms: 20.0
