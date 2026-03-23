@@ -24,7 +24,7 @@ Node::Node() : rclcpp::Node("los_guidance_node") {
   loadParameters();
   
   // 2. Инициализация контроллеров
-  initializeControllers();
+  // initializeControllers(); // вызовем в другом месте
   
   // 3. Создание publishers/subscribers/services
   createPublishers();
@@ -39,6 +39,13 @@ Node::Node() : rclcpp::Node("los_guidance_node") {
   
   RCLCPP_INFO(this->get_logger(), "LOS Guidance Node initialized successfully");
 }
+
+
+void Node::postConstruct() {
+  RCLCPP_INFO(this->get_logger(), "Post-constructing controllers...");
+  initializeControllers();  // ✅ Теперь shared_from_this() работает
+}
+
 
 // ============================================================================
 // Инициализация
@@ -194,10 +201,11 @@ void Node::loadParameters() {
   
   config_.adrc_r = this->get_parameter("adrc.td_r").as_double();
   config_.adrc_h = this->get_parameter("adrc.td_h").as_double();
-  config_.adrc_n = this->get_parameter("adrc.td_n").as_double();
+  config_.adrc_n = static_cast<double>(this->get_parameter("adrc.td_n").as_int());
   
   // === Sync параметры ===
-  this->declare_parameter("sync.buffer_size", 100);
+  // this->declare_parameter("sync.buffer_size", 10А0);
+  this->declare_parameter("sync.buffer_size", 1000);
   this->declare_parameter("sync.retention_us", 200000);
   
   config_.sync_buffer_size = this->get_parameter("sync.buffer_size").as_int();

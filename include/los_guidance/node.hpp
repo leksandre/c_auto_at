@@ -166,6 +166,8 @@ public:
    */
   Node();
   
+  void postConstruct(); 
+
   /**
    * @brief Деструктор
    */

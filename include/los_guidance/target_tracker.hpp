@@ -227,7 +227,7 @@ private:
    */
   Eigen::Vector3d camToNav_(
     const Eigen::Vector3d& u_c,
-    const Eigen::Matrix3d& R_bc,
+    // const Eigen::Matrix3d& R_bc,
     const Eigen::Matrix3d& R_nb
   );
   
