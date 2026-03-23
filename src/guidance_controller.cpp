@@ -265,13 +265,13 @@ Eigen::Vector3d GuidanceController::computePnPI_(
   
   // Feedforward (Y axis)
   double ay_pn_ff = 0.0;
-  if (config_.los_y_ff_enable) {
+  if (config_.los_y_ffenable) {
     if (u_los.y() > config_.los_y_err_ff_limit) {
       ay_pn_ff = config_.los_y_ff * (u_los.y() - config_.los_y_err_ff_limit);
     } else if (u_los.y() < -config_.los_y_err_ff_limit) {
       ay_pn_ff = config_.los_y_ff * (u_los.y() + config_.los_y_err_ff_limit);
     }
-    ay_pn_ff = clamp_(ay_pn_ff, -config_.los_y_ff_limit, config_.los_y_ff_limit);
+    ay_pn_ff = clamp_(ay_pn_ff, -config_.los_y_fflimit, config_.los_y_fflimit_;
   }
   
   // Feedforward (Z axis)
@@ -282,7 +282,7 @@ Eigen::Vector3d GuidanceController::computePnPI_(
     } else if (u_los.z() < -config_.los_z_err_ff_limit) {
       az_pn_ff = config_.los_z_ff * (u_los.z() + config_.los_z_err_ff_limit);
     }
-    az_pn_ff = clamp_(az_pn_ff, -config_.los_z_ff_limit, config_.los_z_ff_limit);
+    az_pn_ff = clamp_(az_pn_ff, -config_.los_z_fflimit, config_.los_z_fflimit);
   }
   
   // PI контроль
@@ -411,6 +411,7 @@ Eigen::Vector3d GuidanceController::addParallelAcceleration_(
   double Vc,
   double dt
 ) {
+    (void)dt; 
   // Parallel acceleration для увеличения Vc
   double acc_parallel = config_.acc_parallel_gain * (config_.max_vc - Vc);
   acc_parallel = acc_parallel_pre_ + config_.acc_parallel_alpha * (acc_parallel - acc_parallel_pre_);

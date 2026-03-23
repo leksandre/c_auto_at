@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-03-20 15:10:37
+Дата: 2026-03-20 15:26:01
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -2189,24 +2189,24 @@ Eigen::Vector3d GuidanceController::computePnPI_(
   
   // Feedforward (Y axis)
   double ay_pn_ff = 0.0;
-  if (config_.los_y_ffenable) {
+  if (config_.los_y_ff_enable) {
     if (u_los.y() > config_.los_y_err_ff_limit) {
       ay_pn_ff = config_.los_y_ff * (u_los.y() - config_.los_y_err_ff_limit);
     } else if (u_los.y() < -config_.los_y_err_ff_limit) {
       ay_pn_ff = config_.los_y_ff * (u_los.y() + config_.los_y_err_ff_limit);
     }
-    ay_pn_ff = clamp_(ay_pn_ff, -config_.los_y_fflimit_, config_.los_y_fflimit_);
+    ay_pn_ff = clamp_(ay_pn_ff, -config_.los_y_ff_limit, config_.los_y_ff_limit);
   }
   
   // Feedforward (Z axis)
   double az_pn_ff = 0.0;
-  if (config_.los_z_ffenable) {
+  if (config_.los_z_ff_enable) {
     if (u_los.z() > config_.los_z_err_ff_limit) {
       az_pn_ff = config_.los_z_ff * (u_los.z() - config_.los_z_err_ff_limit);
     } else if (u_los.z() < -config_.los_z_err_ff_limit) {
       az_pn_ff = config_.los_z_ff * (u_los.z() + config_.los_z_err_ff_limit);
     }
-    az_pn_ff = clamp_(az_pn_ff, -config_.los_z_fflimit_, config_.los_z_fflimit_);
+    az_pn_ff = clamp_(az_pn_ff, -config_.los_z_ff_limit, config_.los_z_ff_limit);
   }
   
   // PI контроль
@@ -2839,7 +2839,7 @@ int main(int argc, char **argv) {
 }
 ================================================================================
 Файл: ./src/node.cpp
-Строк: 643
+Строк: 645
 ================================================================================
 
 /**
@@ -3235,7 +3235,8 @@ void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) 
     const Eigen::Matrix3d R = quat.toRotationMatrix();
     const double roll = std::atan2(R(2, 1), R(2, 2));
     const double pitch = std::asin(-R(2, 0));
-    
+    const double yaw = std::atan2(R(1, 0), R(0, 0)); 
+
     // Матрица вращения nav → body
     Eigen::Matrix3d R_nb = quat.toRotationMatrix();
     
@@ -3258,6 +3259,7 @@ void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) 
       
       // 🎯 Расчёт ускорения через GuidanceController
       // double Vc = guidance_ctrl_->estimateVc(pitch, config_.max_tilt_deg * DEG2RAD);
+
 
 
       GuidanceOutput output = guidance_ctrl_->computeAcceleration(
@@ -3953,7 +3955,7 @@ TargetTracker::TrackerStats TargetTracker::getStats() const {
 } // namespace los_guidance
 ================================================================================
 Файл: ./src/vehicle_controller.cpp
-Строк: 530
+Строк: 529
 ================================================================================
 
 /**
@@ -4458,7 +4460,6 @@ FlightMode VehicleController::navStateToFlightMode_(uint8_t nav_state) const {
     
     case NavState::NAVIGATION_STATE_MANUAL:
     case NavState::NAVIGATION_STATE_STAB:
-    case NavState::NAVIGATION_STATE_RATTITUDE:
       return FlightMode::MANUAL;
     
     case NavState::NAVIGATION_STATE_ALTCTL:
@@ -4735,5 +4736,5 @@ def generate_launch_description():
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 4590
+Всего строк: 4591
 ================================================================================
