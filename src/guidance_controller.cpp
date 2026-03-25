@@ -131,27 +131,61 @@ GuidanceOutput GuidanceController::computeAccelerationWithVc(
   return output;
 }
 
-double GuidanceController::estimateVcFromPitch(double pitch_rad, double max_tilt_rad) {
-  // v = K * sqrt(tan(-pitch))
-  double vc = 0.0;
+// double GuidanceController::estimateVcFromPitch(double pitch_rad, double max_tilt_rad) {
+//   // v = K * sqrt(tan(-pitch))
+//   double vc = 0.0;
   
-  if (-pitch_rad > max_tilt_rad) {
-    vc = config_.max_vc;
-  } else if (-pitch_rad < config_.min_vc / CONSTANTS_ONE_G) {
-    vc = config_.min_vc;
-  } else {
-    double forward_acc = std::sqrt(std::tan(-pitch_rad));
-    vc = (forward_acc - vc_linear_min_) * vc_linear_k_ + config_.min_vc;
+//   if (-pitch_rad > max_tilt_rad) {
+//     vc = config_.max_vc;
+//   } else if (-pitch_rad < config_.min_vc / CONSTANTS_ONE_G) {
+//     vc = config_.min_vc;
+//   } else {
+//     double forward_acc = std::sqrt(std::tan(-pitch_rad));
+//     vc = (forward_acc - vc_linear_min_) * vc_linear_k_ + config_.min_vc;
+//   }
+  
+//   // Сглаживание
+//   vc = vc_pre_ + config_.vc_alpha * (vc - vc_pre_);
+//   vc_pre_ = vc;
+  
+//   debug_info_.vc_estimate = vc;
+  
+//   return vc;
+// }
+
+
+double GuidanceController::estimateVcFromPitch(double pitch_rad, double max_tilt_rad) {
+  // 🆕 Компенсация ЦТ
+  double pitch_compensated = pitch_rad;
+  if (config_.enable_cg_compensation) {
+    double cg_trim_rad = config_.cg_trim_pitch_deg * M_PI / 180.0;
+    pitch_compensated = pitch_rad - cg_trim_rad;
   }
   
-  // Сглаживание
-  vc = vc_pre_ + config_.vc_alpha * (vc - vc_pre_);
+  double vc = 0.0;
+  
+  // 🆕 Масштабирование для тяжёлого дрона
+  double effective_max_tilt = max_tilt_rad * config_.accel_scale;
+  double effective_min_tilt = (config_.min_vc / CONSTANTS_ONE_G) * config_.accel_scale;
+  
+  if (-pitch_compensated > effective_max_tilt) {
+    vc = config_.max_vc * config_.accel_scale;  // 🆕 Применяем масштаб
+  } else if (-pitch_compensated < effective_min_tilt) {
+    vc = config_.min_vc * config_.accel_scale;
+  } else {
+    double forward_acc = std::sqrt(std::tan(-pitch_compensated));
+    vc = (forward_acc - vc_linear_min_) * vc_linear_k_ + config_.min_vc;
+    vc *= config_.accel_scale;  // 🆕 Применяем масштаб
+  }
+  
+  // 🆕 Больше сглаживание для тяжёлого
+  vc = vc_pre_ + (config_.vc_alpha * config_.mass_ratio) * (vc - vc_pre_);
   vc_pre_ = vc;
   
   debug_info_.vc_estimate = vc;
-  
   return vc;
 }
+
 
 double GuidanceController::estimateVcFromAcc(const Eigen::Vector3d& acc_sp) {
   // v = K * sqrt(acc)
@@ -404,13 +438,40 @@ Eigen::Vector3d GuidanceController::computeInterceptPI_(
   return a_pn;
 }
 
+// Eigen::Vector3d GuidanceController::clampAcceleration_(const Eigen::Vector3d& acc) {
+//   Eigen::Vector3d acc_clamped;
+//   acc_clamped.x() = clamp_(acc.x(), -config_.max_hor_acc, config_.max_hor_acc);
+//   acc_clamped.y() = clamp_(acc.y(), -config_.max_hor_acc, config_.max_hor_acc);
+//   acc_clamped.z() = clamp_(acc.z(), config_.max_up_acc, config_.max_down_acc);
+//   return acc_clamped;
+// }
+
+
 Eigen::Vector3d GuidanceController::clampAcceleration_(const Eigen::Vector3d& acc) {
   Eigen::Vector3d acc_clamped;
-  acc_clamped.x() = clamp_(acc.x(), -config_.max_hor_acc, config_.max_hor_acc);
-  acc_clamped.y() = clamp_(acc.y(), -config_.max_hor_acc, config_.max_hor_acc);
-  acc_clamped.z() = clamp_(acc.z(), config_.max_up_acc, config_.max_down_acc);
+  
+  // 🆕 Динамическое ограничение с учётом массы
+  double mass_factor = config_.accel_scale;  // = 0.62 для 2519г
+  
+  acc_clamped.x() = clamp_(
+    acc.x(),
+    -config_.max_hor_acc * mass_factor,
+    config_.max_hor_acc * mass_factor
+  );
+  acc_clamped.y() = clamp_(
+    acc.y(),
+    -config_.max_hor_acc * mass_factor,
+    config_.max_hor_acc * mass_factor
+  );
+  acc_clamped.z() = clamp_(
+    acc.z(),
+    config_.max_up_acc * mass_factor,
+    config_.max_down_acc * mass_factor
+  );
+  
   return acc_clamped;
 }
+
 
 Eigen::Vector3d GuidanceController::addParallelAcceleration_(
   const Eigen::Vector3d& acc,

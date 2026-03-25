@@ -443,6 +443,51 @@ bool VehicleController::publishVehicleCommand_(
   return true;
 }
 
+// Eigen::Vector3d VehicleController::smoothAcceleration_(
+//   const Eigen::Vector3d& acc_raw
+// ) {
+//   if (!acc_initialized_) {
+//     acc_smoothed_ = acc_raw;
+//     acc_initialized_ = true;
+//     return acc_raw;
+//   }
+  
+//   // Exponential moving average
+//   acc_smoothed_ = acc_smoothed_ + 
+//     config_.acc_smooth_alpha * (acc_raw - acc_smoothed_);
+  
+//   return acc_smoothed_;
+// }
+
+// Eigen::Vector3d VehicleController::clampAcceleration_(
+//   const Eigen::Vector3d& acc
+// ) {
+//   Eigen::Vector3d acc_clamped;
+  
+//   // Горизонтальные оси (X, Y)
+//   acc_clamped.x() = std::clamp(
+//     acc.x(),
+//     -config_.max_hor_acc_limit,
+//     config_.max_hor_acc_limit
+//   );
+//   acc_clamped.y() = std::clamp(
+//     acc.y(),
+//     -config_.max_hor_acc_limit,
+//     config_.max_hor_acc_limit
+//   );
+  
+//   // Вертикальная ось (Z) - NED frame
+//   acc_clamped.z() = std::clamp(
+//     acc.z(),
+//     config_.max_up_acc,
+//     config_.max_down_acc
+//   );
+  
+//   return acc_clamped;
+// }
+
+
+
 Eigen::Vector3d VehicleController::smoothAcceleration_(
   const Eigen::Vector3d& acc_raw
 ) {
@@ -452,39 +497,50 @@ Eigen::Vector3d VehicleController::smoothAcceleration_(
     return acc_raw;
   }
   
-  // Exponential moving average
-  acc_smoothed_ = acc_smoothed_ + 
-    config_.acc_smooth_alpha * (acc_raw - acc_smoothed_);
+  // 🆕 Адаптивное сглаживание для тяжёлого дрона (2519г)
+  double acc_change = (acc_raw - acc_smoothed_).norm();
+  double adaptive_alpha = config_.acc_smooth_alpha;
   
+  // Более консервативно для тяжёлого
+  if (acc_change > 1.0) {  // ↓ Меньше порог
+    adaptive_alpha = 0.15;  // ↓ Меньше сглаживание при резких изменениях
+  } else if (acc_change < 0.2) {
+    adaptive_alpha = 0.04;  // ↓ Больше сглаживание при плавных
+  }
+  
+  acc_smoothed_ = acc_smoothed_ + adaptive_alpha * (acc_raw - acc_smoothed_);
   return acc_smoothed_;
 }
+
+
 
 Eigen::Vector3d VehicleController::clampAcceleration_(
   const Eigen::Vector3d& acc
 ) {
   Eigen::Vector3d acc_clamped;
   
-  // Горизонтальные оси (X, Y)
+  // 🆕 Для тяжёлого дрона (2519г) - более консервативные лимиты
+  double heavy_drone_factor = 0.62;  // = 1562/2519
+  
   acc_clamped.x() = std::clamp(
     acc.x(),
-    -config_.max_hor_acc_limit,
-    config_.max_hor_acc_limit
+    -config_.max_hor_acc_limit * heavy_drone_factor,
+    config_.max_hor_acc_limit * heavy_drone_factor
   );
   acc_clamped.y() = std::clamp(
     acc.y(),
-    -config_.max_hor_acc_limit,
-    config_.max_hor_acc_limit
+    -config_.max_hor_acc_limit * heavy_drone_factor,
+    config_.max_hor_acc_limit * heavy_drone_factor
   );
-  
-  // Вертикальная ось (Z) - NED frame
   acc_clamped.z() = std::clamp(
     acc.z(),
-    config_.max_up_acc,
-    config_.max_down_acc
+    config_.max_up_acc * heavy_drone_factor,
+    config_.max_down_acc * heavy_drone_factor
   );
   
   return acc_clamped;
 }
+
 
 uint64_t VehicleController::getCurrentTimestamp_() const {
   auto now = node_->get_clock()->now();

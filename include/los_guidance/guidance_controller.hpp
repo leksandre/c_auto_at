@@ -88,6 +88,18 @@ struct GuidanceConfig {
   double adrc_r{1000.0};
   double adrc_h{0.01};
   double adrc_n{2};
+
+    // 🆕 Для тяжёлого дрона
+  double mass_old_g{1562.0};      // Старая масса (граммы)
+  double mass_new_g{2519.0};      // Новая масса (граммы)
+  double mass_ratio{1.61};        // = mass_new / mass_old
+  double accel_scale{0.62};       // = 1/mass_ratio
+  double pid_scale{0.79};         // = sqrt(1/mass_ratio)
+  
+  // 🆕 Компенсация ЦТ
+  double cg_trim_pitch_deg{2.5};
+  bool enable_cg_compensation{true};
+  
 };
 
 /**

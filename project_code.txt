@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-03-23 17:51:59
+Дата: 2026-03-25 06:54:58
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -862,7 +862,7 @@ private:
 #endif // LOS_GUIDANCE_LOS_ESTIMATOR_HPP_
 ================================================================================
 Файл: ./include/los_guidance/node.hpp
-Строк: 325
+Строк: 327
 ================================================================================
 
 /**
@@ -1033,6 +1033,8 @@ public:
    */
   Node();
   
+  void postConstruct(); 
+
   /**
    * @brief Деструктор
    */
@@ -2748,7 +2750,7 @@ bool LosEstimator::isValidVector_(const Eigen::VectorXd& v) const {
 } // namespace los_guidance
 ================================================================================
 Файл: ./src/main.cpp
-Строк: 93
+Строк: 95
 ================================================================================
 
 /**
@@ -2787,6 +2789,8 @@ int main(int argc, char **argv) {
   // Используем shared_ptr для совместимости с Executor
   auto los_node = std::make_shared<los_guidance::Node>();
   
+  los_node->postConstruct();
+
   // === 3. Логирование старта ===
   RCLCPP_INFO(los_node->get_logger(), "===========================================");
   RCLCPP_INFO(los_node->get_logger(), "LOS Guidance Node Starting...");
@@ -2847,7 +2851,7 @@ int main(int argc, char **argv) {
 }
 ================================================================================
 Файл: ./src/node.cpp
-Строк: 646
+Строк: 653
 ================================================================================
 
 /**
@@ -2876,7 +2880,7 @@ Node::Node() : rclcpp::Node("los_guidance_node") {
   loadParameters();
   
   // 2. Инициализация контроллеров
-  initializeControllers();
+  // initializeControllers(); // вызовем в другом месте
   
   // 3. Создание publishers/subscribers/services
   createPublishers();
@@ -2891,6 +2895,13 @@ Node::Node() : rclcpp::Node("los_guidance_node") {
   
   RCLCPP_INFO(this->get_logger(), "LOS Guidance Node initialized successfully");
 }
+
+
+void Node::postConstruct() {
+  RCLCPP_INFO(this->get_logger(), "Post-constructing controllers...");
+  initializeControllers();  // ✅ Теперь shared_from_this() работает
+}
+
 
 // ============================================================================
 // Инициализация
@@ -4745,5 +4756,5 @@ def generate_launch_description():
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 4600
+Всего строк: 4611
 ================================================================================
