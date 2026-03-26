@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-03-25 06:54:58
+Дата: 2026-03-26 11:55:45
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -226,7 +226,7 @@ struct GuidanceConfig {
 #endif  // LOS_GUIDANCE_GUIDANCE_CONFIG_HPP_
 ================================================================================
 Файл: ./include/los_guidance/guidance_controller.hpp
-Строк: 361
+Строк: 373
 ================================================================================
 
 /**
@@ -319,6 +319,18 @@ struct GuidanceConfig {
   double adrc_r{1000.0};
   double adrc_h{0.01};
   double adrc_n{2};
+
+    // 🆕 Для тяжёлого дрона
+  double mass_old_g{1562.0};      // Старая масса (граммы)
+  double mass_new_g{2519.0};      // Новая масса (граммы)
+  double mass_ratio{1.61};        // = mass_new / mass_old
+  double accel_scale{0.62};       // = 1/mass_ratio
+  double pid_scale{0.79};         // = sqrt(1/mass_ratio)
+  
+  // 🆕 Компенсация ЦТ
+  double cg_trim_pitch_deg{2.5};
+  bool enable_cg_compensation{true};
+  
 };
 
 /**
@@ -1921,7 +1933,7 @@ private:
 
 ================================================================================
 Файл: ./src/guidance_controller.cpp
-Строк: 463
+Строк: 524
 ================================================================================
 
 /**
@@ -2057,27 +2069,61 @@ GuidanceOutput GuidanceController::computeAccelerationWithVc(
   return output;
 }
 
-double GuidanceController::estimateVcFromPitch(double pitch_rad, double max_tilt_rad) {
-  // v = K * sqrt(tan(-pitch))
-  double vc = 0.0;
+// double GuidanceController::estimateVcFromPitch(double pitch_rad, double max_tilt_rad) {
+//   // v = K * sqrt(tan(-pitch))
+//   double vc = 0.0;
   
-  if (-pitch_rad > max_tilt_rad) {
-    vc = config_.max_vc;
-  } else if (-pitch_rad < config_.min_vc / CONSTANTS_ONE_G) {
-    vc = config_.min_vc;
-  } else {
-    double forward_acc = std::sqrt(std::tan(-pitch_rad));
-    vc = (forward_acc - vc_linear_min_) * vc_linear_k_ + config_.min_vc;
+//   if (-pitch_rad > max_tilt_rad) {
+//     vc = config_.max_vc;
+//   } else if (-pitch_rad < config_.min_vc / CONSTANTS_ONE_G) {
+//     vc = config_.min_vc;
+//   } else {
+//     double forward_acc = std::sqrt(std::tan(-pitch_rad));
+//     vc = (forward_acc - vc_linear_min_) * vc_linear_k_ + config_.min_vc;
+//   }
+  
+//   // Сглаживание
+//   vc = vc_pre_ + config_.vc_alpha * (vc - vc_pre_);
+//   vc_pre_ = vc;
+  
+//   debug_info_.vc_estimate = vc;
+  
+//   return vc;
+// }
+
+
+double GuidanceController::estimateVcFromPitch(double pitch_rad, double max_tilt_rad) {
+  // 🆕 Компенсация ЦТ
+  double pitch_compensated = pitch_rad;
+  if (config_.enable_cg_compensation) {
+    double cg_trim_rad = config_.cg_trim_pitch_deg * M_PI / 180.0;
+    pitch_compensated = pitch_rad - cg_trim_rad;
   }
   
-  // Сглаживание
-  vc = vc_pre_ + config_.vc_alpha * (vc - vc_pre_);
+  double vc = 0.0;
+  
+  // 🆕 Масштабирование для тяжёлого дрона
+  double effective_max_tilt = max_tilt_rad * config_.accel_scale;
+  double effective_min_tilt = (config_.min_vc / CONSTANTS_ONE_G) * config_.accel_scale;
+  
+  if (-pitch_compensated > effective_max_tilt) {
+    vc = config_.max_vc * config_.accel_scale;  // 🆕 Применяем масштаб
+  } else if (-pitch_compensated < effective_min_tilt) {
+    vc = config_.min_vc * config_.accel_scale;
+  } else {
+    double forward_acc = std::sqrt(std::tan(-pitch_compensated));
+    vc = (forward_acc - vc_linear_min_) * vc_linear_k_ + config_.min_vc;
+    vc *= config_.accel_scale;  // 🆕 Применяем масштаб
+  }
+  
+  // 🆕 Больше сглаживание для тяжёлого
+  vc = vc_pre_ + (config_.vc_alpha * config_.mass_ratio) * (vc - vc_pre_);
   vc_pre_ = vc;
   
   debug_info_.vc_estimate = vc;
-  
   return vc;
 }
+
 
 double GuidanceController::estimateVcFromAcc(const Eigen::Vector3d& acc_sp) {
   // v = K * sqrt(acc)
@@ -2330,13 +2376,40 @@ Eigen::Vector3d GuidanceController::computeInterceptPI_(
   return a_pn;
 }
 
+// Eigen::Vector3d GuidanceController::clampAcceleration_(const Eigen::Vector3d& acc) {
+//   Eigen::Vector3d acc_clamped;
+//   acc_clamped.x() = clamp_(acc.x(), -config_.max_hor_acc, config_.max_hor_acc);
+//   acc_clamped.y() = clamp_(acc.y(), -config_.max_hor_acc, config_.max_hor_acc);
+//   acc_clamped.z() = clamp_(acc.z(), config_.max_up_acc, config_.max_down_acc);
+//   return acc_clamped;
+// }
+
+
 Eigen::Vector3d GuidanceController::clampAcceleration_(const Eigen::Vector3d& acc) {
   Eigen::Vector3d acc_clamped;
-  acc_clamped.x() = clamp_(acc.x(), -config_.max_hor_acc, config_.max_hor_acc);
-  acc_clamped.y() = clamp_(acc.y(), -config_.max_hor_acc, config_.max_hor_acc);
-  acc_clamped.z() = clamp_(acc.z(), config_.max_up_acc, config_.max_down_acc);
+  
+  // 🆕 Динамическое ограничение с учётом массы
+  double mass_factor = config_.accel_scale;  // = 0.62 для 2519г
+  
+  acc_clamped.x() = clamp_(
+    acc.x(),
+    -config_.max_hor_acc * mass_factor,
+    config_.max_hor_acc * mass_factor
+  );
+  acc_clamped.y() = clamp_(
+    acc.y(),
+    -config_.max_hor_acc * mass_factor,
+    config_.max_hor_acc * mass_factor
+  );
+  acc_clamped.z() = clamp_(
+    acc.z(),
+    config_.max_up_acc * mass_factor,
+    config_.max_down_acc * mass_factor
+  );
+  
   return acc_clamped;
 }
+
 
 Eigen::Vector3d GuidanceController::addParallelAcceleration_(
   const Eigen::Vector3d& acc,
@@ -3975,7 +4048,7 @@ TargetTracker::TrackerStats TargetTracker::getStats() const {
 } // namespace los_guidance
 ================================================================================
 Файл: ./src/vehicle_controller.cpp
-Строк: 529
+Строк: 585
 ================================================================================
 
 /**
@@ -4423,6 +4496,51 @@ bool VehicleController::publishVehicleCommand_(
   return true;
 }
 
+// Eigen::Vector3d VehicleController::smoothAcceleration_(
+//   const Eigen::Vector3d& acc_raw
+// ) {
+//   if (!acc_initialized_) {
+//     acc_smoothed_ = acc_raw;
+//     acc_initialized_ = true;
+//     return acc_raw;
+//   }
+  
+//   // Exponential moving average
+//   acc_smoothed_ = acc_smoothed_ + 
+//     config_.acc_smooth_alpha * (acc_raw - acc_smoothed_);
+  
+//   return acc_smoothed_;
+// }
+
+// Eigen::Vector3d VehicleController::clampAcceleration_(
+//   const Eigen::Vector3d& acc
+// ) {
+//   Eigen::Vector3d acc_clamped;
+  
+//   // Горизонтальные оси (X, Y)
+//   acc_clamped.x() = std::clamp(
+//     acc.x(),
+//     -config_.max_hor_acc_limit,
+//     config_.max_hor_acc_limit
+//   );
+//   acc_clamped.y() = std::clamp(
+//     acc.y(),
+//     -config_.max_hor_acc_limit,
+//     config_.max_hor_acc_limit
+//   );
+  
+//   // Вертикальная ось (Z) - NED frame
+//   acc_clamped.z() = std::clamp(
+//     acc.z(),
+//     config_.max_up_acc,
+//     config_.max_down_acc
+//   );
+  
+//   return acc_clamped;
+// }
+
+
+
 Eigen::Vector3d VehicleController::smoothAcceleration_(
   const Eigen::Vector3d& acc_raw
 ) {
@@ -4432,39 +4550,50 @@ Eigen::Vector3d VehicleController::smoothAcceleration_(
     return acc_raw;
   }
   
-  // Exponential moving average
-  acc_smoothed_ = acc_smoothed_ + 
-    config_.acc_smooth_alpha * (acc_raw - acc_smoothed_);
+  // 🆕 Адаптивное сглаживание для тяжёлого дрона (2519г)
+  double acc_change = (acc_raw - acc_smoothed_).norm();
+  double adaptive_alpha = config_.acc_smooth_alpha;
   
+  // Более консервативно для тяжёлого
+  if (acc_change > 1.0) {  // ↓ Меньше порог
+    adaptive_alpha = 0.15;  // ↓ Меньше сглаживание при резких изменениях
+  } else if (acc_change < 0.2) {
+    adaptive_alpha = 0.04;  // ↓ Больше сглаживание при плавных
+  }
+  
+  acc_smoothed_ = acc_smoothed_ + adaptive_alpha * (acc_raw - acc_smoothed_);
   return acc_smoothed_;
 }
+
+
 
 Eigen::Vector3d VehicleController::clampAcceleration_(
   const Eigen::Vector3d& acc
 ) {
   Eigen::Vector3d acc_clamped;
   
-  // Горизонтальные оси (X, Y)
+  // 🆕 Для тяжёлого дрона (2519г) - более консервативные лимиты
+  double heavy_drone_factor = 0.62;  // = 1562/2519
+  
   acc_clamped.x() = std::clamp(
     acc.x(),
-    -config_.max_hor_acc_limit,
-    config_.max_hor_acc_limit
+    -config_.max_hor_acc_limit * heavy_drone_factor,
+    config_.max_hor_acc_limit * heavy_drone_factor
   );
   acc_clamped.y() = std::clamp(
     acc.y(),
-    -config_.max_hor_acc_limit,
-    config_.max_hor_acc_limit
+    -config_.max_hor_acc_limit * heavy_drone_factor,
+    config_.max_hor_acc_limit * heavy_drone_factor
   );
-  
-  // Вертикальная ось (Z) - NED frame
   acc_clamped.z() = std::clamp(
     acc.z(),
-    config_.max_up_acc,
-    config_.max_down_acc
+    config_.max_up_acc * heavy_drone_factor,
+    config_.max_down_acc * heavy_drone_factor
   );
   
   return acc_clamped;
 }
+
 
 uint64_t VehicleController::getCurrentTimestamp_() const {
   auto now = node_->get_clock()->now();
@@ -4756,5 +4885,5 @@ def generate_launch_description():
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 4611
+Всего строк: 4740
 ================================================================================

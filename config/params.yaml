@@ -15,90 +15,100 @@ los_guidance_node:
         pitch_deg: 5.0
         yaw_deg: 0.0
       
-      # Фильтрация
-      pixel_smooth_alpha: 0.3
-      los_smooth_alpha: 0.1
-      min_confidence: 0.5
-      
-      # Координация
-      frame_id: "camera"
-      nav_frame_id: "ned"
-
+      # Фильтрация ⬇️ УВЕЛИЧЕНО для тяжёлого дрона
+      pixel_smooth_alpha: 0.5      # ↑ Было 0.3 (↑67%)
+      los_smooth_alpha: 0.2        # ↑ Было 0.1 (↑100%)
+      min_confidence: 0.6          # ↑ Было 0.5 (строже)
+    
     # === Kalman Filter LOS ===
     kalman:
-      los_process_noise_Q: 0.01
-      los_measurement_noise_R: 0.1
-      use_gyro_compensation: false
-
+      los_process_noise_Q: 0.016   # ↑ Было 0.01 (×1.6)
+      los_measurement_noise_R: 0.16 # ↑ Было 0.1 (×1.6)
+      use_gyro_compensation: true  # ✅ ВКЛЮЧИТЬ для тяжёлого
+      enable_adaptive_noise: true  # ✅ ВКЛЮЧИТЬ
+      adaptive_min_scale: 0.5
+      adaptive_max_scale: 15.0
+      innovation_gate_sigma: 3.0   # 🆕 Отсечение выбросов
+    
     # === Наведение (Guidance) ===
     guidance:
-      pn_gain_N: 3.0
-      max_tilt_deg: 45.0
-      min_tilt_deg: 5.0
-      enable_PI_control: false
+      pn_gain_N: 2.4               # ↓ Было 3.0 (×0.79)
+      max_tilt_deg: 35.0           # ↓ Было 45.0 (безопаснее)
+      min_tilt_deg: 8.0            # ↑ Было 5.0
+      enable_PI_control: true      # ✅ ВКЛЮЧИТЬ для тяжёлого
       enable_acceleration_parallel: false
       top_attack_mode: false
-
+      
+      # 🆕 Компенсация ЦТ (если сместился)
+      cg_trim_pitch_deg: 2.5       # Настроить экспериментально
+      cg_pitch_offset_deg: 2.0
+      enable_cg_compensation: true
+    
     # === Скорость (Vc estimation) ===
     velocity:
-      min_vc_mps: 1.0
-      max_vc_mps: 20.0
-      vc_alpha_smooth: 0.1
-
+      min_vc_mps: 1.2              # ↑ Было 1.0 (тяжелее разгон)
+      max_vc_mps: 12.5             # ↓ Было 20.0 (×0.62)
+      vc_alpha_smooth: 0.16        # ↑ Было 0.1 (×1.6)
+      
+      # 🆕 Масштабирование для тяжёлого
+      vc_pitch_scale: 0.62         # = accel_scale
+      vc_acc_scale: 0.62
+    
     # === PI контроллер LOS ===
     los_pi:
       y:
-        kp: 3.0
-        ki: 0.01
-        ff_enable: false
-        ff_gain: 7.0
-        ff_limit: 3.0
-        err_ff_limit: 0.1
-        int_limit: 3.0
+        kp: 2.4                    # ↓ Было 3.0 (×0.79)
+        ki: 0.008                  # ↓ Было 0.01 (×0.79)
+        ff_enable: true
+        ff_gain: 5.5               # ↓ Было 7.0 (×0.79)
+        ff_limit: 2.4              # ↓ Было 3.0 (×0.79)
+        err_ff_limit: 0.15
+        int_limit: 2.4             # ↓ Было 3.0 (×0.79)
       z:
-        kp: 3.0
-        ki: 0.01
-        ff_enable: false
-        ff_gain: 7.0
-        ff_limit: 3.0
-        err_ff_limit: 0.1
-        int_limit: 5.0
-
+        kp: 2.4                    # ↓ Было 3.0 (×0.79)
+        ki: 0.008                  # ↓ Было 0.01 (×0.79)
+        ff_enable: true
+        ff_gain: 5.5               # ↓ Было 7.0 (×0.79)
+        ff_limit: 2.4              # ↓ Было 3.0 (×0.79)
+        err_ff_limit: 0.15
+        int_limit: 4.0             # ↓ Было 5.0 (×0.79)
+    
     # === Intercept алгоритм ===
     intercept:
-      kp: 3.0
-      ki: 0.01
-      kd: 0.01
-      int_limit: 1.0
-      z_kp: 5.0
-      acc_alpha: 0.1
-
+      kp: 2.4                      # ↓ Было 3.0 (×0.79)
+      ki: 0.008                    # ↓ Было 0.01 (×0.79)
+      kd: 0.008                    # ↓ Было 0.01 (×0.79)
+      int_limit: 0.8               # ↓ Было 1.0 (×0.79)
+      z_kp: 4.0                    # ↓ Было 5.0 (×0.79)
+      acc_alpha: 0.16              # ↑ Было 0.1 (×1.6)
+    
     # === Ограничения ускорений ===
     acceleration:
-      max_lateral_mps2: 3.0
-      max_vertical_up_mps2: -5.0
-      max_vertical_down_mps2: 5.0
-      max_horizontal_mps2: 12.0
-      ax_rate_limit_mps3: 1.0
-      apn_alpha: 0.1
+      max_lateral_mps2: 1.86       # ↓ Было 3.0 (×0.62)
+      max_vertical_up_mps2: -3.1   # ↓ Было -5.0 (×0.62)
+      max_vertical_down_mps2: 3.1  # ↓ Было 5.0 (×0.62)
+      max_horizontal_mps2: 7.44    # ↓ Было 12.0 (×0.62)
+      ax_rate_limit_mps3: 0.62     # ↓ Было 1.0 (×0.62)
+      apn_alpha: 0.16              # ↑ Было 0.1 (×1.6)
+      
       parallel:
         enable: false
-        gain: 0.1
-        alpha: 0.1
-        max_mps2: 2.0
-
+        gain: 0.062                # ↓ Было 0.1 (×0.62)
+        alpha: 0.16                # ↑ Было 0.1 (×1.6)
+        max_mps2: 1.24             # ↓ Было 2.0 (×0.62)
+    
     # === ADRC ===
     adrc:
-      td_r: 1000.0
-      td_h: 0.01
-      td_n: 2.0
-
+      td_r: 800.0                  # ↓ Было 1000.0 (плавнее)
+      td_h: 0.016                  # ↑ Было 0.01 (медленнее)
+      td_n: 2
+    
     # === Синхронизация ===
     sync:
-      buffer_size: 100.0
-      retention_us: 200000.0
+      buffer_size: 160             # ↑ Было 100 (×1.6)
+      retention_us: 320000         # ↑ Было 200000 (×1.6)
       debug: false
-
+    
     # === Таймеры ===
     timer:
-      update_ms: 20.0
+      update_ms: 25                # ↑ Было 20 (тяжёлый медленнее)

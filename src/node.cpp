@@ -537,6 +537,36 @@ void Node::trackBBox2DCallback(vision_msgs::msg::Detection2D::SharedPtr msg) {
 
 void Node::vehicleStatusCallback(px4_msgs::msg::VehicleStatus::SharedPtr msg) {
   vehicle_ctrl_->updateStatus(msg);
+
+
+
+
+
+    
+  // // 🆕 Авто-триггер атаки при переходе в OFFBOARD
+  // FlightMode new_mode = navStateToFlightMode_(msg->nav_state);
+  
+  // if (new_mode == FlightMode::OFFBOARD && state_ != FlightMode::OFFBOARD) {
+  //   // Только если система готова к атаке
+  //   if (attack_ready_) {
+  //     std::lock_guard<std::mutex> lock(state_mutex_);
+  //     start_attack_ = true;  // ← Триггер атаки!
+  //     RCLCPP_INFO(this->get_logger(), "🎯 OFFBOARD → ATTACK START");
+  //   }
+  // }
+  
+  // // 🆕 Авто-стоп при выходе из OFFBOARD
+  // if (new_mode != FlightMode::OFFBOARD && state_ == FlightMode::OFFBOARD) {
+  //   std::lock_guard<std::mutex> lock(state_mutex_);
+  //   start_attack_ = false;  // ← Стоп атаки
+  //   RCLCPP_INFO(this->get_logger(), "🛑 Left OFFBOARD → ATTACK STOP");
+  // }
+  
+  // state_ = new_mode;
+
+
+
+
 }
 
 void Node::vehicleAttitudeCallback(px4_msgs::msg::VehicleAttitude::SharedPtr msg) {
