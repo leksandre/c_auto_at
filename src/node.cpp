@@ -373,9 +373,26 @@ void Node::createServices() {
 // Callbacks
 // ============================================================================
 
+
+
+
 void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) {
+
+      // === 🪵 ОТЛАДОЧНЫЕ ЛОГИ (добавить в начало) ===
+    if (config_.debug) {
+        RCLCPP_DEBUG(this->get_logger(), 
+            "🎯 trackerResultCallback 00: ts=%lu, conf=%.3f",
+            msg->timestamp,
+            msg->target_info.confidence
+        );
+    }
+
   uint64_t ref_us = msg->timestamp / 1000;  // ns → us
   
+  //RCLCPP_INFO(this->get_logger(), "🔍 trackerResultCallback 11: ref_us=%lu", ref_us);
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,  "🔍 trackerResultCallback 11: ref_us=%lu", ref_us);
+  
+
   // Синхронизация с attitude и gyro
   auto sync_msg = sensor_sync_->sync(ref_us);
   
@@ -384,6 +401,10 @@ void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) 
   bool quat_ready = false;
   bool gyro_ready = false;
   
+
+    // === Синхронизация с attitude и gyro ===
+
+
   if (sync_msg[att_sync_key_]) {
     quat = *std::static_pointer_cast<Eigen::Quaterniond>(sync_msg[att_sync_key_]);
     quat_ready = true;
@@ -394,6 +415,29 @@ void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) 
     gyro_ready = true;
   }
   
+
+//insertion for test
+quat_ready = true;
+gyro_ready = true;
+
+  //RCLCPP_INFO(this->get_logger(), "   quat_ready=%d, gyro_ready=%d", quat_ready, gyro_ready);
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000, "   quat_ready=%d, gyro_ready=%d", quat_ready, gyro_ready);
+
+
+
+
+      // === 🪵 Лог синхронизации ===
+    if (config_.debug) {
+        //RCLCPP_DEBUG(this->get_logger(),
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+            "🔗 Sync: trackerResultCallback 22:  quat=%d, gyro=%d, ref_us=%lu",
+            quat_ready ? 1 : 0,
+            gyro_ready ? 1 : 0,
+            ref_us
+        );
+    }
+
+
   if (quat_ready && gyro_ready) {
     // Конвертация quaternion → euler
     const Eigen::Matrix3d R = quat.toRotationMatrix();
@@ -412,6 +456,31 @@ void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) 
       R_nb
     );
     
+            // === 🪵 Лог результата трекинга ===
+        if (config_.debug) {
+            //RCLCPP_DEBUG(this->get_logger(),
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+                "🎯 Target: trackerResultCallback 33:  pixel=(%.1f,%.1f)→(%.1f,%.1f), conf=%.3f, valid=%d",
+                target.pixel_u, target.pixel_v,
+                target.pixel_u_smooth, target.pixel_v_smooth,
+                target.confidence,
+                target.is_valid ? 1 : 0
+            );
+        }
+
+    if (target.is_valid) {
+        //RCLCPP_INFO(this->get_logger(), 
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+        " trackerResultCallback 44:   ✅ target.valid=true, confidence=%.2f", target.confidence);
+        //RCLCPP_INFO(this->get_logger(), 
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+        "   🎯 Setting attack_ready_=true");
+    } else {
+        //RCLCPP_WARN(this->get_logger(), 
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+        "  trackerResultCallback 44:  ❌ target.valid=false");
+    }
+
     if (target.is_valid) {
       // 🎯 Обновление Kalman Filter
       los_estimator_->predict(config_.update_ms / 1000.0, omega_b, R_nb);
@@ -421,6 +490,16 @@ void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) 
       Eigen::Vector3d u_los = los_estimator_->getLosVector();
       Eigen::Vector3d lambda = los_estimator_->getLosAngularVelocity();
       
+                  // === 🪵 Лог LOS вектора ===
+            if (config_.debug) {
+                //RCLCPP_DEBUG(this->get_logger(),
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+                    "📐 LOS: trackerResultCallback 55:  nav=[%.3f,%.3f,%.3f], lambda=[%.3f,%.3f,%.3f]",
+                    u_los.x(), u_los.y(), u_los.z(),
+                    lambda.x(), lambda.y(), lambda.z()
+                );
+            }
+            
       // 🎯 Расчёт ускорения через GuidanceController
       // double Vc = guidance_ctrl_->estimateVc(pitch, config_.max_tilt_deg * DEG2RAD);
 
@@ -434,6 +513,15 @@ void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) 
       );
       Eigen::Vector3d acc_cmd = output.acceleration_cmd;
       
+                  // === 🪵 Лог команды ускорения ===
+            if (config_.debug) {
+                //RCLCPP_DEBUG(this->get_logger(),
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+                    "🚀 Acc cmd: trackerResultCallback 66:  [%.3f, %.3f, %.3f] m/s²",
+                    acc_cmd.x(), acc_cmd.y(), acc_cmd.z()
+                );
+            }
+
       // 🎯 Публикация статуса для отладки
       publishLosStatus(target, acc_cmd);
       
@@ -442,15 +530,39 @@ void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) 
         std::lock_guard<std::mutex> lock(state_mutex_);
         // guidance_ctrl_->setLastAccelerationCommand(acc_cmd);
         attack_ready_ = true;
+        //RCLCPP_INFO(this->get_logger(), 
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+        "attack_ready_  trackerResultCallback");
+
+                        // === 🪵 Лог готовности к атаке ===
+                //RCLCPP_INFO(this->get_logger(), 
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+                    "✅ trackerResultCallback 77:  attack_ready_=true | conf=%.2f | acc=[%.2f,%.2f,%.2f]",
+                    target.confidence,
+                    acc_cmd.x(), acc_cmd.y(), acc_cmd.z()
+                );
+
+
       }
-    }
+    } else {
+            // === 🪵 Лог если цель не валидна ===
+            if (config_.debug) {
+                //RCLCPP_WARN(this->get_logger(),
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+                    "❌ trackerResultCallback 77:  Target invalid: conf=%.3f < min_confidence=%.3f",
+                    target.confidence,
+                    tracker_config_.min_confidence
+                );
+            }
+        }
   }
 }
 
 void Node::trackBBox2DCallback(vision_msgs::msg::Detection2D::SharedPtr msg) {
   uint64_t ref_us = static_cast<uint64_t>(msg->header.stamp.sec * 1e6) +
                     static_cast<uint64_t>(msg->header.stamp.nanosec * 1e-3);
-  
+  RCLCPP_INFO(this->get_logger(), "🔍 trackBBox2DCallback: ref_us=%lu", ref_us);
+
   auto sync_msg = sensor_sync_->sync(ref_us);
   
   Eigen::Quaterniond quat;
@@ -528,12 +640,16 @@ void Node::trackBBox2DCallback(vision_msgs::msg::Detection2D::SharedPtr msg) {
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
         attack_ready_ = true;
+        RCLCPP_INFO(this->get_logger(), "attack_ready_  trackBBox2DCallback");
       }
     }
 
 
   }
 }
+
+
+
 
 void Node::vehicleStatusCallback(px4_msgs::msg::VehicleStatus::SharedPtr msg) {
   vehicle_ctrl_->updateStatus(msg);

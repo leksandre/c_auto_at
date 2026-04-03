@@ -38,7 +38,7 @@ int main(int argc, char **argv) {
 
   // === 3. Логирование старта ===
   RCLCPP_INFO(los_node->get_logger(), "===========================================");
-  RCLCPP_INFO(los_node->get_logger(), "LOS Guidance Node Starting...");
+    
   RCLCPP_INFO(los_node->get_logger(), "Threading Model: MultiThreadedExecutor");
   RCLCPP_INFO(los_node->get_logger(), "===========================================");
   

@@ -107,7 +107,7 @@ los_guidance_node:
     sync:
       buffer_size: 160             # ↑ Было 100 (×1.6)
       retention_us: 320000         # ↑ Было 200000 (×1.6)
-      debug: false
+      debug: true
     
     # === Таймеры ===
     timer:
