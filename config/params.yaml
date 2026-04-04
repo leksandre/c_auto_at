@@ -112,3 +112,7 @@ los_guidance_node:
     # === Таймеры ===
     timer:
       update_ms: 25                # ↑ Было 20 (тяжёлый медленнее)
+
+    commander:
+      enable: true
+      port: 11471  # или 22472, как вам удобно

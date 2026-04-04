@@ -203,6 +203,14 @@ void Node::loadParameters() {
   config_.adrc_h = this->get_parameter("adrc.td_h").as_double();
   config_.adrc_n = static_cast<double>(this->get_parameter("adrc.td_n").as_int());
   
+
+    // === Commander параметры ===
+  this->declare_parameter("commander.enable", false);
+  this->declare_parameter("commander.port", 11471);
+  commander_enabled_ = this->get_parameter("commander.enable").as_bool();
+  commander_port_ = static_cast<int>(this->get_parameter("commander.port").as_int());
+
+
   // === Sync параметры ===
   // this->declare_parameter("sync.buffer_size", 10А0);
   this->declare_parameter("sync.buffer_size", 1000);
@@ -282,7 +290,23 @@ void Node::initializeControllers() {
   sensor_sync_ = std::make_unique<SensorSync>(sync_config_);
   sensor_sync_->registerSource(att_sync_key_);
   sensor_sync_->registerSource(ang_rate_sync_key_);
+
   
+  // === 6. Commander (сетевые команды атаки) ===
+  if (commander_enabled_) {
+    commander_ = std::make_unique<Commander>(
+      commander_port_,
+      [this](bool start) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        start_attack_ = start;
+        RCLCPP_INFO(this->get_logger(), "🌐 Commander: start_attack_ set to %s", start ? "true" : "false");
+      },
+      this->get_logger()
+    );
+    commander_->start();
+  }
+
+
   if (config_.debug) {
     sensor_sync_->setDebug(true);
   }
@@ -354,6 +378,12 @@ void Node::createSubscribers() {
     std::bind(&Node::vehicleAngularVelocityCallback, this, std::placeholders::_1)
   );
   
+
+  gps_pos_sub_ = this->create_subscription<px4_msgs::msg::VehicleGlobalPosition>(
+    "/fmu/out/vehicle_global_position",
+    rclcpp::SensorDataQoS().keep_last(1), // DDS QoS для сенсоров
+    std::bind(&Node::vehicleGlobalPositionCallback, this, std::placeholders::_1));
+    
   RCLCPP_INFO(this->get_logger(), "Subscribers created successfully");
 }
 
@@ -374,7 +404,23 @@ void Node::createServices() {
 // ============================================================================
 
 
+void Node::vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg) {
+  if (!msg) return;
 
+  // 1. Сохраняем в state_mutex_ (потокобезопасно)
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  drone_gps_.lat = msg->lat;
+  drone_gps_.lon = msg->lon;
+  drone_gps_.alt = msg->alt;
+  drone_gps_.timestamp_us = msg->timestamp_sample;
+  drone_gps_.is_valid = msg->valid_global_pos;
+
+  // 2. Синхронизируем с IMU/attitude через ваш SensorSync
+  sensor_sync_->addMessage("drone_gps", msg->timestamp_sample, std::make_shared<px4_msgs::msg::VehicleGlobalPosition>(msg));
+
+  RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+    "GPS: %.7f, %.7f, %.2f (valid: %s)", msg->lat, msg->lon, msg->alt, msg->valid_global_pos ? "Y" : "N");
+}
 
 void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) {
 

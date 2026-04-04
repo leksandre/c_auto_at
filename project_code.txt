@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-04-03 18:26:58
+Дата: 2026-04-04 14:06:46
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -874,7 +874,7 @@ private:
 #endif // LOS_GUIDANCE_LOS_ESTIMATOR_HPP_
 ================================================================================
 Файл: ./include/los_guidance/node.hpp
-Строк: 327
+Строк: 339
 ================================================================================
 
 /**
@@ -901,6 +901,8 @@ private:
 #include <vector>
 #include <mutex>
 
+#include <px4_msgs/msg/vehicle_global_position.hpp>
+
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
@@ -924,6 +926,7 @@ private:
 #include "los_guidance/vehicle_controller.hpp"
 #include "los_guidance/sensor_sync.hpp"
 #include "los_guidance/adrc.hpp"
+#include "los_guidance/commander.hpp"
 
 namespace los_guidance {
 
@@ -1200,6 +1203,15 @@ private:
   static constexpr double CONSTANTS_ONE_G = 9.80665;    ///< Ускорение свободного падения
   static constexpr double RAD2DEG = 180.0 / M_PI;       ///< Радианы → Градусы
   static constexpr double DEG2RAD = M_PI / 180.0;       ///< Градусы → Радианы
+
+
+  std::unique_ptr<Commander> commander_;
+  bool commander_enabled_{false};
+  int commander_port_{11471}; // По умолчанию как в вашем примере
+
+  rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr gps_pos_sub_;
+  void vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
+
 };
 
 } // namespace los_guidance
@@ -1922,9 +1934,254 @@ private:
 } // namespace los_guidance
 
 #endif // LOS_GUIDANCE_VEHICLE_CONTROLLER_HPP_
+================================================================================
+Файл: ./include/los_guidance/сommander.hpp
+Строк: 77
+================================================================================
+
+/**
+ * @file sensor_sync.hpp
+ * @brief Синхронизация сообщений по времени
+ * @note Поддерживает PX4 и ROS2 сообщения с разными timestamp
+ */
+#ifndef LOS_GUIDANCE_SENSOR_SYNC_HPP_
+#define LOS_GUIDANCE_SENSOR_SYNC_HPP_
+
+#pragma once
+#include <deque>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+
+namespace los_guidance {
+
+/**
+ * @struct SyncConfig
+ * @brief Конфигурация синхронизации
+ */
+struct SyncConfig {
+  size_t buffer_size{100};
+  int retention_us{200000};  // 200ms
+  bool debug{false};
+};
+
+/**
+ * @class SensorSync
+ * @brief Политика синхронизации по ближайшему сообщению
+ * 
+ * @thread_safe Да (все методы потокобезопасны)
+ */
+class SensorSync {
+public:
+  explicit SensorSync(const SyncConfig& config = SyncConfig());
+  
+  /**
+   * @brief Регистрация источника данных
+   * @param name Имя источника (например "att", "gyro")
+   */
+  void registerSource(const std::string& name);
+  
+  /**
+   * @brief Добавление сообщения в буфер
+   * @param source Имя источника
+   * @param ts_us Timestamp в микросекундах
+   * @param msg Указатель на сообщение
+   */
+  void addMessage(
+    const std::string& source,
+    uint64_t ts_us,
+    std::shared_ptr<void> msg
+  );
+  
+  /**
+   * @brief Синхронизация всех источников по опорному времени
+   * @param ref_time Опорный timestamp
+   * @return Map с синхронизированными сообщениями
+   */
+  std::map<std::string, std::shared_ptr<void>> sync(uint64_t ref_time);
+  
+  /**
+   * @brief Включение/выключение отладки
+   */
+  void setDebug(bool enable);
+
+private:
+  SyncConfig config_;
+  std::map<std::string, std::deque<std::pair<uint64_t, std::shared_ptr<void>>>> buffers_;
+  mutable std::mutex mutex_;  // Защита буферов
+  
+  std::shared_ptr<void> getNearest_(const std::string& source, uint64_t ref);
+  void dropUntil_(const std::string& source, uint64_t ref_time);
+};
+
+} // namespace los_guidance
+#endif
 
 === src ===
 
+================================================================================
+Файл: ./src/commander.cpp
+Строк: 156
+================================================================================
+
+/**
+ * @file sensor_sync.cpp
+ * @brief Реализация класса SensorSync (синхронизация сообщений)
+ * @note Рефакторинг SyncApproxPolicy для модульности
+ * 
+ * @author Snow Pang, ssnowpang@gmail.com
+ * @date 2025-09
+ * @copyright BSD 3-Clause License
+ */
+
+#include "los_guidance/sensor_sync.hpp"
+#include <algorithm>
+#include <cmath>
+#include <iostream> 
+
+namespace los_guidance {
+
+// ============================================================================
+// Конструктор
+// ============================================================================
+
+SensorSync::SensorSync(const SyncConfig& config)
+  : config_(config)
+{
+}
+
+// ============================================================================
+// Публичные методы
+// ============================================================================
+
+void SensorSync::registerSource(const std::string& name) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  
+  if (buffers_.find(name) == buffers_.end()) {
+    buffers_[name] = std::deque<std::pair<uint64_t, std::shared_ptr<void>>>();
+    
+    if (config_.debug) {
+      std::cout << "[SensorSync] Registered source: " << name << std::endl;
+    }
+  }
+}
+
+void SensorSync::addMessage(
+  const std::string& source,
+  uint64_t ts_us,
+  std::shared_ptr<void> msg
+) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  
+  auto it = buffers_.find(source);
+  if (it == buffers_.end()) {
+    if (config_.debug) {
+      std::cerr << "[SensorSync] Warning: Source '" << source 
+                << "' not registered" << std::endl;
+    }
+    return;
+  }
+  
+  auto& buf = it->second;
+  buf.push_back({ts_us, msg});
+  
+  // Ограничение размера буфера
+  while (buf.size() > config_.buffer_size) {
+    buf.pop_front();
+  }
+  
+  // Очистка старых сообщений
+  while (!buf.empty() && buf.front().first < ts_us - config_.retention_us) {
+    buf.pop_front();
+  }
+  
+  if (config_.debug) {
+    std::cout << "[SensorSync] Added message to '" << source 
+              << "' at " << ts_us << " us, buffer size: " 
+              << buf.size() << std::endl;
+  }
+}
+
+std::map<std::string, std::shared_ptr<void>> SensorSync::sync(uint64_t ref_time) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  
+  std::map<std::string, std::shared_ptr<void>> result;
+  
+  for (auto& [name, buf] : buffers_) {
+    result[name] = getNearest_(name, ref_time);
+    
+    if (result[name]) {
+      dropUntil_(name, ref_time);
+    }
+  }
+  
+  if (config_.debug) {
+    std::cout << "[SensorSync] Sync completed at " << ref_time 
+              << " us, sources: " << result.size() << std::endl;
+  }
+  
+  return result;
+}
+
+void SensorSync::setDebug(bool enable) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  config_.debug = enable;
+}
+
+// ============================================================================
+// Приватные методы
+// ============================================================================
+
+std::shared_ptr<void> SensorSync::getNearest_(
+  const std::string& source,
+  uint64_t ref
+) {
+  auto it = buffers_.find(source);
+  if (it == buffers_.end() || it->second.empty()) {
+    return nullptr;
+  }
+  
+  const auto& buf = it->second;
+  std::shared_ptr<void> nearest = nullptr;
+  uint64_t min_diff = std::numeric_limits<uint64_t>::max();
+  uint64_t nearest_ts = 0;
+  
+  for (const auto& [ts, msg] : buf) {
+    uint64_t diff = std::llabs(static_cast<int64_t>(ts - ref));
+    if (diff < min_diff) {
+      min_diff = diff;
+      nearest = msg;
+      nearest_ts = ts;
+    }
+  }
+  
+  if (config_.debug && nearest) {
+    std::cout << "[SensorSync] Source: " << source
+              << " | Ref: " << ref
+              << " | Nearest: " << nearest_ts
+              << " | Diff: " << min_diff << " us" << std::endl;
+  }
+  
+  return nearest;
+}
+
+void SensorSync::dropUntil_(
+  const std::string& source,
+  uint64_t ref_time
+) {
+  auto it = buffers_.find(source);
+  if (it == buffers_.end()) {
+    return;
+  }
+  
+  auto& buf = it->second;
+  while (!buf.empty() && buf.front().first < ref_time) {
+    buf.pop_front();
+  }
+}
+
+} // namespace los_guidance
 ================================================================================
 Файл: ./src/guidance_config.cpp
 Строк: 0
@@ -2924,7 +3181,7 @@ int main(int argc, char **argv) {
 }
 ================================================================================
 Файл: ./src/node.cpp
-Строк: 799
+Строк: 845
 ================================================================================
 
 /**
@@ -3132,6 +3389,14 @@ void Node::loadParameters() {
   config_.adrc_h = this->get_parameter("adrc.td_h").as_double();
   config_.adrc_n = static_cast<double>(this->get_parameter("adrc.td_n").as_int());
   
+
+    // === Commander параметры ===
+  this->declare_parameter("commander.enable", false);
+  this->declare_parameter("commander.port", 11471);
+  commander_enabled_ = this->get_parameter("commander.enable").as_bool();
+  commander_port_ = static_cast<int>(this->get_parameter("commander.port").as_int());
+
+
   // === Sync параметры ===
   // this->declare_parameter("sync.buffer_size", 10А0);
   this->declare_parameter("sync.buffer_size", 1000);
@@ -3211,7 +3476,23 @@ void Node::initializeControllers() {
   sensor_sync_ = std::make_unique<SensorSync>(sync_config_);
   sensor_sync_->registerSource(att_sync_key_);
   sensor_sync_->registerSource(ang_rate_sync_key_);
+
   
+  // === 6. Commander (сетевые команды атаки) ===
+  if (commander_enabled_) {
+    commander_ = std::make_unique<Commander>(
+      commander_port_,
+      [this](bool start) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        start_attack_ = start;
+        RCLCPP_INFO(this->get_logger(), "🌐 Commander: start_attack_ set to %s", start ? "true" : "false");
+      },
+      this->get_logger()
+    );
+    commander_->start();
+  }
+
+
   if (config_.debug) {
     sensor_sync_->setDebug(true);
   }
@@ -3283,6 +3564,12 @@ void Node::createSubscribers() {
     std::bind(&Node::vehicleAngularVelocityCallback, this, std::placeholders::_1)
   );
   
+
+  gps_pos_sub_ = this->create_subscription<px4_msgs::msg::VehicleGlobalPosition>(
+    "/fmu/out/vehicle_global_position",
+    rclcpp::SensorDataQoS().keep_last(1), // DDS QoS для сенсоров
+    std::bind(&Node::vehicleGlobalPositionCallback, this, std::placeholders::_1));
+    
   RCLCPP_INFO(this->get_logger(), "Subscribers created successfully");
 }
 
@@ -3303,7 +3590,23 @@ void Node::createServices() {
 // ============================================================================
 
 
+void Node::vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg) {
+  if (!msg) return;
 
+  // 1. Сохраняем в state_mutex_ (потокобезопасно)
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  drone_gps_.lat = msg->lat;
+  drone_gps_.lon = msg->lon;
+  drone_gps_.alt = msg->alt;
+  drone_gps_.timestamp_us = msg->timestamp_sample;
+  drone_gps_.is_valid = msg->valid_global_pos;
+
+  // 2. Синхронизируем с IMU/attitude через ваш SensorSync
+  sensor_sync_->addMessage("drone_gps", msg->timestamp_sample, std::make_shared<px4_msgs::msg::VehicleGlobalPosition>(msg));
+
+  RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+    "GPS: %.7f, %.7f, %.2f (valid: %s)", msg->lat, msg->lon, msg->alt, msg->valid_global_pos ? "Y" : "N");
+}
 
 void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg) {
 
@@ -4788,7 +5091,7 @@ FlightMode VehicleController::navStateToFlightMode_(uint8_t nav_state) const {
 
 ================================================================================
 Файл конфигурации: ./config/params.yaml
-Строк: 113
+Строк: 117
 ================================================================================
 
 los_guidance_node:
@@ -4905,6 +5208,10 @@ los_guidance_node:
     # === Таймеры ===
     timer:
       update_ms: 25                # ↑ Было 20 (тяжёлый медленнее)
+
+    commander:
+      enable: true
+      port: 11471  # или 22472, как вам удобно
 
 === ФАЙЛЫ СБОРКИ ===
 
@@ -5037,9 +5344,9 @@ def generate_launch_description():
 ================================================================================
 СТАТИСТИКА
 ================================================================================
-Всего файлов (код + конфиги + сборка): 19
+Всего файлов (код + конфиги + сборка): 21
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 4896
+Всего строк: 5191
 ================================================================================

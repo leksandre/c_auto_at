@@ -22,6 +22,8 @@
 #include <vector>
 #include <mutex>
 
+#include <px4_msgs/msg/vehicle_global_position.hpp>
+
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
@@ -45,6 +47,7 @@
 #include "los_guidance/vehicle_controller.hpp"
 #include "los_guidance/sensor_sync.hpp"
 #include "los_guidance/adrc.hpp"
+#include "los_guidance/commander.hpp"
 
 namespace los_guidance {
 
@@ -321,6 +324,15 @@ private:
   static constexpr double CONSTANTS_ONE_G = 9.80665;    ///< Ускорение свободного падения
   static constexpr double RAD2DEG = 180.0 / M_PI;       ///< Радианы → Градусы
   static constexpr double DEG2RAD = M_PI / 180.0;       ///< Градусы → Радианы
+
+
+  std::unique_ptr<Commander> commander_;
+  bool commander_enabled_{false};
+  int commander_port_{11471}; // По умолчанию как в вашем примере
+
+  rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr gps_pos_sub_;
+  void vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
+
 };
 
 } // namespace los_guidance
