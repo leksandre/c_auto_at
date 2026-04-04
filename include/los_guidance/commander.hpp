@@ -1,78 +1,41 @@
-/**
- * @file sensor_sync.hpp
- * @brief Синхронизация сообщений по времени
- * @note Поддерживает PX4 и ROS2 сообщения с разными timestamp
- */
-#ifndef LOS_GUIDANCE_SENSOR_SYNC_HPP_
-#define LOS_GUIDANCE_SENSOR_SYNC_HPP_
+#ifndef LOS_GUIDANCE_COMMANDER_HPP_
+#define LOS_GUIDANCE_COMMANDER_HPP_
 
-#pragma once
-#include <deque>
-#include <map>
-#include <memory>
-#include <mutex>
+#include <thread>
+#include <atomic>
+#include <functional>
 #include <string>
+#include <rclcpp/rclcpp.hpp>
 
-namespace los_guidance {
+namespace los_guidance
+{
 
-/**
- * @struct SyncConfig
- * @brief Конфигурация синхронизации
- */
-struct SyncConfig {
-  size_t buffer_size{100};
-  int retention_us{200000};  // 200ms
-  bool debug{false};
-};
+  class Commander
+  {
+  public:
+    using AttackCallback = std::function<void(bool)>;
+    using AutoModeCallback = std::function<void()>;
 
-/**
- * @class SensorSync
- * @brief Политика синхронизации по ближайшему сообщению
- * 
- * @thread_safe Да (все методы потокобезопасны)
- */
-class SensorSync {
-public:
-  explicit SensorSync(const SyncConfig& config = SyncConfig());
-  
-  /**
-   * @brief Регистрация источника данных
-   * @param name Имя источника (например "att", "gyro")
-   */
-  void registerSource(const std::string& name);
-  
-  /**
-   * @brief Добавление сообщения в буфер
-   * @param source Имя источника
-   * @param ts_us Timestamp в микросекундах
-   * @param msg Указатель на сообщение
-   */
-  void addMessage(
-    const std::string& source,
-    uint64_t ts_us,
-    std::shared_ptr<void> msg
-  );
-  
-  /**
-   * @brief Синхронизация всех источников по опорному времени
-   * @param ref_time Опорный timestamp
-   * @return Map с синхронизированными сообщениями
-   */
-  std::map<std::string, std::shared_ptr<void>> sync(uint64_t ref_time);
-  
-  /**
-   * @brief Включение/выключение отладки
-   */
-  void setDebug(bool enable);
+    explicit Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb, rclcpp::Logger logger);
+    ~Commander();
 
-private:
-  SyncConfig config_;
-  std::map<std::string, std::deque<std::pair<uint64_t, std::shared_ptr<void>>>> buffers_;
-  mutable std::mutex mutex_;  // Защита буферов
-  
-  std::shared_ptr<void> getNearest_(const std::string& source, uint64_t ref);
-  void dropUntil_(const std::string& source, uint64_t ref_time);
-};
+    void start();
+    void stop();
+
+  private:
+    void listenLoop();
+    void handleConnection(int client_fd);
+    void processCommand(const std::string &data);
+    bool parseAttackCommand(const std::string &data, bool &result);
+
+    int port_;
+    AttackCallback attack_callback_;
+    AutoModeCallback auto_mode_callback_; // 🆕 Новый колбэк
+    rclcpp::Logger logger_;
+    std::thread listen_thread_;
+    std::atomic<bool> running_{false};
+    int server_fd_ = -1;
+  };
 
 } // namespace los_guidance
-#endif
+#endif // LOS_GUIDANCE_COMMANDER_HPP_

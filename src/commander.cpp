@@ -1,157 +1,157 @@
-/**
- * @file sensor_sync.cpp
- * @brief Реализация класса SensorSync (синхронизация сообщений)
- * @note Рефакторинг SyncApproxPolicy для модульности
- * 
- * @author Snow Pang, ssnowpang@gmail.com
- * @date 2025-09
- * @copyright BSD 3-Clause License
- */
-
-#include "los_guidance/sensor_sync.hpp"
+#include "los_guidance/commander.hpp"
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <cstring>
 #include <algorithm>
-#include <cmath>
-#include <iostream> 
 
-namespace los_guidance {
-
-// ============================================================================
-// Конструктор
-// ============================================================================
-
-SensorSync::SensorSync(const SyncConfig& config)
-  : config_(config)
+namespace los_guidance
 {
-}
 
-// ============================================================================
-// Публичные методы
-// ============================================================================
+  Commander::Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb, rclcpp::Logger logger)
+      : port_(port), attack_callback_(std::move(attack_cb)), auto_mode_callback_(std::move(auto_cb)), logger_(std::move(logger)) {}
 
-void SensorSync::registerSource(const std::string& name) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  
-  if (buffers_.find(name) == buffers_.end()) {
-    buffers_[name] = std::deque<std::pair<uint64_t, std::shared_ptr<void>>>();
-    
-    if (config_.debug) {
-      std::cout << "[SensorSync] Registered source: " << name << std::endl;
+  Commander::~Commander() { stop(); }
+
+  void Commander::start()
+  {
+    if (running_)
+      return;
+    running_ = true;
+    listen_thread_ = std::thread(&Commander::listenLoop, this);
+    RCLCPP_INFO(logger_, "📡 Commander listening on TCP port %d", port_);
+  }
+
+  void Commander::stop()
+  {
+    if (!running_)
+      return;
+    running_ = false;
+    if (server_fd_ != -1)
+    {
+      shutdown(server_fd_, SHUT_RDWR);
+      close(server_fd_);
+      server_fd_ = -1;
+    }
+    if (listen_thread_.joinable())
+      listen_thread_.join();
+    RCLCPP_INFO(logger_, "📡 Commander stopped");
+  }
+
+  void Commander::listenLoop()
+  {
+    server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd_ < 0)
+    {
+      RCLCPP_ERROR(logger_, "Failed to create socket");
+      return;
+    }
+
+    int opt = 1;
+    setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in address
+    {
+    };
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(port_);
+
+    if (bind(server_fd_, (struct sockaddr *)&address, sizeof(address)) < 0)
+    {
+      RCLCPP_ERROR(logger_, "Failed to bind to port %d", port_);
+      close(server_fd_);
+      return;
+    }
+    if (listen(server_fd_, 5) < 0)
+    {
+      RCLCPP_ERROR(logger_, "Failed to listen on port %d", port_);
+      close(server_fd_);
+      return;
+    }
+
+    while (running_)
+    {
+      fd_set readfds;
+      FD_ZERO(&readfds);
+      FD_SET(server_fd_, &readfds);
+      struct timeval timeout
+      {
+      };
+      timeout.tv_sec = 1;
+      timeout.tv_usec = 0;
+      if (select(server_fd_ + 1, &readfds, nullptr, nullptr, &timeout) > 0 && FD_ISSET(server_fd_, &readfds))
+      {
+        struct sockaddr_in client_addr
+        {
+        };
+        socklen_t client_len = sizeof(client_addr);
+        int new_socket = accept(server_fd_, (struct sockaddr *)&client_addr, &client_len);
+        if (new_socket >= 0)
+          std::thread(&Commander::handleConnection, this, new_socket).detach();
+      }
+    }
+    close(server_fd_);
+  }
+
+  void Commander::handleConnection(int client_fd)
+  {
+    char buffer[512] = {0};
+    int bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
+    if (bytes_read > 0)
+    {
+      buffer[bytes_read] = '\0';
+      processCommand(std::string(buffer));
+    }
+    close(client_fd);
+  }
+
+  void Commander::processCommand(const std::string &data)
+  {
+    // 🆕 Проверяем set_mode: auto
+    if (data.find("\"set_mode\"") != std::string::npos && data.find("auto") != std::string::npos)
+    {
+      RCLCPP_INFO(logger_, "🤖 Received command: set_mode auto");
+      if (auto_mode_callback_)
+        auto_mode_callback_();
+      return;
+    }
+    // Обычная команда атаки
+    bool attack_cmd = false;
+    if (parseAttackCommand(data, attack_cmd))
+    {
+      RCLCPP_INFO(logger_, "🎯 Received attack command: %s", attack_cmd ? "START" : "STOP");
+      if (attack_callback_)
+        attack_callback_(attack_cmd);
+    }
+    else
+    {
+      RCLCPP_WARN(logger_, "⚠️ Invalid command format: %s", data.c_str());
     }
   }
-}
 
-void SensorSync::addMessage(
-  const std::string& source,
-  uint64_t ts_us,
-  std::shared_ptr<void> msg
-) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  
-  auto it = buffers_.find(source);
-  if (it == buffers_.end()) {
-    if (config_.debug) {
-      std::cerr << "[SensorSync] Warning: Source '" << source 
-                << "' not registered" << std::endl;
+  bool Commander::parseAttackCommand(const std::string &data, bool &result)
+  {
+    size_t pos = data.find("start_attack");
+    if (pos == std::string::npos)
+      return false;
+    size_t val_pos = data.find(':', pos);
+    if (val_pos == std::string::npos)
+      return false;
+    std::string val = data.substr(val_pos + 1);
+    val.erase(0, val.find_first_not_of(" \t\r\n"));
+    if (val.substr(0, 4) == "true" || val.substr(0, 1) == "1")
+    {
+      result = true;
+      return true;
     }
-    return;
-  }
-  
-  auto& buf = it->second;
-  buf.push_back({ts_us, msg});
-  
-  // Ограничение размера буфера
-  while (buf.size() > config_.buffer_size) {
-    buf.pop_front();
-  }
-  
-  // Очистка старых сообщений
-  while (!buf.empty() && buf.front().first < ts_us - config_.retention_us) {
-    buf.pop_front();
-  }
-  
-  if (config_.debug) {
-    std::cout << "[SensorSync] Added message to '" << source 
-              << "' at " << ts_us << " us, buffer size: " 
-              << buf.size() << std::endl;
-  }
-}
-
-std::map<std::string, std::shared_ptr<void>> SensorSync::sync(uint64_t ref_time) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  
-  std::map<std::string, std::shared_ptr<void>> result;
-  
-  for (auto& [name, buf] : buffers_) {
-    result[name] = getNearest_(name, ref_time);
-    
-    if (result[name]) {
-      dropUntil_(name, ref_time);
+    if (val.substr(0, 5) == "false" || val.substr(0, 1) == "0")
+    {
+      result = false;
+      return true;
     }
+    return false;
   }
-  
-  if (config_.debug) {
-    std::cout << "[SensorSync] Sync completed at " << ref_time 
-              << " us, sources: " << result.size() << std::endl;
-  }
-  
-  return result;
-}
-
-void SensorSync::setDebug(bool enable) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  config_.debug = enable;
-}
-
-// ============================================================================
-// Приватные методы
-// ============================================================================
-
-std::shared_ptr<void> SensorSync::getNearest_(
-  const std::string& source,
-  uint64_t ref
-) {
-  auto it = buffers_.find(source);
-  if (it == buffers_.end() || it->second.empty()) {
-    return nullptr;
-  }
-  
-  const auto& buf = it->second;
-  std::shared_ptr<void> nearest = nullptr;
-  uint64_t min_diff = std::numeric_limits<uint64_t>::max();
-  uint64_t nearest_ts = 0;
-  
-  for (const auto& [ts, msg] : buf) {
-    uint64_t diff = std::llabs(static_cast<int64_t>(ts - ref));
-    if (diff < min_diff) {
-      min_diff = diff;
-      nearest = msg;
-      nearest_ts = ts;
-    }
-  }
-  
-  if (config_.debug && nearest) {
-    std::cout << "[SensorSync] Source: " << source
-              << " | Ref: " << ref
-              << " | Nearest: " << nearest_ts
-              << " | Diff: " << min_diff << " us" << std::endl;
-  }
-  
-  return nearest;
-}
-
-void SensorSync::dropUntil_(
-  const std::string& source,
-  uint64_t ref_time
-) {
-  auto it = buffers_.find(source);
-  if (it == buffers_.end()) {
-    return;
-  }
-  
-  auto& buf = it->second;
-  while (!buf.empty() && buf.front().first < ref_time) {
-    buf.pop_front();
-  }
-}
 
 } // namespace los_guidance

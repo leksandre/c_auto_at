@@ -115,4 +115,6 @@ los_guidance_node:
 
     commander:
       enable: true
-      port: 11471  # или 22472, как вам удобно
+      port: 11471
+      targets: ["192.168.11.181", "192.168.11.183", "192.168.11.184"]
+      target_port: 11471  # Порт, на котором цели слушают запросы SHOWGPS
