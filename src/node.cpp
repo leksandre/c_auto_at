@@ -10,11 +10,6 @@
 
 #include <los_guidance/node.hpp>
 #include <Eigen/Geometry>
-
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <unistd.h>
 #include <cmath>
 #include <limits>
 
@@ -426,13 +421,19 @@ namespace los_guidance
     drone_gps_.lon = msg->lon;
     drone_gps_.alt = msg->alt;
     drone_gps_.timestamp_us = msg->timestamp_sample;
-    drone_gps_.is_valid = msg->valid_global_pos;
 
-    // 2. Синхронизируем с IMU/attitude через ваш SensorSync
-    sensor_sync_->addMessage("drone_gps", msg->timestamp_sample, std::make_shared<px4_msgs::msg::VehicleGlobalPosition>(msg));
+    // 🛠 FIX: valid_global_pos удалён в новых px4_msgs.
+    // Считаем GPS валидным, если пришло сообщение с ненулевым временем.
+    drone_gps_.is_valid = (msg->timestamp_sample > 0);
+
+    // 2. Синхронизируем с IMU/attitude через SensorSync
+    // 🛠 FIX: msg уже является std::shared_ptr, не нужно оборачивать в make_shared
+    sensor_sync_->addMessage("drone_gps", msg->timestamp_sample, msg);
 
     RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                          "GPS: %.7f, %.7f, %.2f (valid: %s)", msg->lat, msg->lon, msg->alt, msg->valid_global_pos ? "Y" : "N");
+                          "GPS: %.7f, %.7f, %.2f (valid: %s)",
+                          msg->lat, msg->lon, msg->alt,
+                          drone_gps_.is_valid ? "Y" : "N");
   }
 
   void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg)
@@ -782,28 +783,102 @@ namespace los_guidance
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
 
-    if (!attack_ready_)
+    // === ФАЗА 1: СБЛИЖЕНИЕ ПО GPS ===
+    if (auto_phase_ == AutoPhase::GPS_APPROACH)
     {
+      if (ref_gps_valid_)
+      {
+        // Конвертируем цель в локальные NED-координаты относительно точки взлёта
+        target_ned_ = gpsToNed(target_gps_.lat, target_gps_.lon, target_gps_.alt,
+                               ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+      }
+
+      bool camera_locked = attack_ready_;
+      double current_dist = 9999.0;
+      if (drone_gps_.is_valid)
+      {
+        current_dist = haversineDist(drone_gps_.lat, drone_gps_.lon,
+                                     target_gps_.lat, target_gps_.lon);
+      }
+
+      // Условие перехода в атаку: камера видит цель И расстояние < 200м
+      if (camera_locked && current_dist < 200.0)
+      {
+        auto_phase_ = AutoPhase::VISUAL_ATTACK;
+        start_attack_ = true;
+        attack_enabled_ = true;
+        RCLCPP_INFO(this->get_logger(), "🎯 VISUAL ATTACK ENGAGED (dist=%.1fm < 200m)", current_dist);
+        // Проваливаемся в логику атаки в этом же тике
+      }
+      else
+      {
+        // Продолжаем лететь по GPS
+        vehicle_ctrl_->publishOffboardControlMode();
+        vehicle_ctrl_->publishPositionSetpoint(target_ned_);
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "🚁 Approaching... Dist: %.1fm | Camera: %s",
+                             current_dist, camera_locked ? "LOCKED" : "SEARCHING");
+        return;
+      }
+    }
+
+    // === ФАЗА 2: ВИЗУАЛЬНАЯ АТАКА (LOS Guidance) ===
+    if (auto_phase_ == AutoPhase::VISUAL_ATTACK)
+    {
+      if (!attack_ready_)
+      {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "⚠️ Target lost during attack!");
+        return; // Дрон остановит ускорения, PX4 перейдёт в Hover
+      }
+
+      bool should_attack = (start_attack_ || attack_enabled_);
+      if (should_attack)
+      {
+        if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD)
+        {
+          update_acc_setpoint_ = true;
+          vehicle_ctrl_->publishOffboardControlMode();
+          vehicle_ctrl_->publishAccelerationSetpoint(guidance_ctrl_->getLastAccelerationCommand());
+        }
+        else
+        {
+          guidance_ctrl_->reset();
+          vehicle_ctrl_->publishOffboardControlMode();
+          vehicle_ctrl_->publishAccelerationSetpoint(guidance_ctrl_->getLastAccelerationCommand());
+          vehicle_ctrl_->setOffboardMode();
+        }
+      }
+      else
+      {
+        if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD && update_acc_setpoint_)
+        {
+          guidance_ctrl_->reset();
+          vehicle_ctrl_->setManualMode();
+          update_acc_setpoint_ = false;
+          auto_phase_ = AutoPhase::IDLE;
+          RCLCPP_INFO(this->get_logger(), "Attack stopped, switched to MANUAL");
+        }
+      }
       return;
     }
 
+    // === ФАЗА 3: ЛЕГАСИ / РУЧНОЙ ТРИГГЕР (TCP start_attack / RC) ===
+    if (!attack_ready_)
+      return;
     bool should_attack = (start_attack_ || attack_enabled_);
-
     if (should_attack)
     {
       if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD)
       {
         update_acc_setpoint_ = true;
         vehicle_ctrl_->publishOffboardControlMode();
-        vehicle_ctrl_->publishAccelerationSetpoint(
-            guidance_ctrl_->getLastAccelerationCommand());
+        vehicle_ctrl_->publishAccelerationSetpoint(guidance_ctrl_->getLastAccelerationCommand());
       }
       else
       {
         guidance_ctrl_->reset();
         vehicle_ctrl_->publishOffboardControlMode();
-        vehicle_ctrl_->publishAccelerationSetpoint(
-            guidance_ctrl_->getLastAccelerationCommand());
+        vehicle_ctrl_->publishAccelerationSetpoint(guidance_ctrl_->getLastAccelerationCommand());
         vehicle_ctrl_->setOffboardMode();
       }
     }
@@ -851,6 +926,242 @@ namespace los_guidance
     std_msgs::msg::Float32MultiArray msg;
     msg.data = debug_data;
     los_intercept_debug_pub_->publish(msg);
+  }
+
+  Eigen::Vector3d Node::gpsToNed(double lat, double lon, double alt,
+                                 double ref_lat, double ref_lon, double ref_alt)
+  {
+    double dlat = (lat - ref_lat) * M_PI / 180.0;
+    double dlon = (lon - ref_lon) * M_PI / 180.0;
+
+    // Простая проекция на плоскость (валидна для дистанций < 2-3 км)
+
+    // double x = dlon * 6371000.0 * std::cos(ref_lat * M_PI / 180.0); // East
+    // double y = dlat * 6371000.0;                                    // North
+    // 🛠 FIX: PX4 NED frame: X=North, Y=East, Z=Down
+    // Раньше было наоборот (X=East), из-за чего дрон летел боком
+    double x = dlat * 6371000.0;                                    // North
+    double y = dlon * 6371000.0 * std::cos(ref_lat * M_PI / 180.0); // East
+
+    double z = -(alt - ref_alt); // Down (NED)
+
+    return {x, y, z};
+  }
+
+  double Node::haversineDist(double lat1, double lon1, double lat2, double lon2)
+  {
+    const double R = 6371000.0; // Радиус Земли в метрах
+    double dLat = (lat2 - lat1) * M_PI / 180.0;
+    double dLon = (lon2 - lon1) * M_PI / 180.0;
+    double a = std::sin(dLat / 2) * std::sin(dLat / 2) +
+               std::cos(lat1 * M_PI / 180.0) * std::cos(lat2 * M_PI / 180.0) *
+                   std::sin(dLon / 2) * std::sin(dLon / 2);
+    return R * 2 * std::atan2(std::sqrt(a), std::sqrt(1 - a));
+  }
+
+  // === TCP-клиент для опроса целей ===
+  bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats)
+  {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0)
+      return false;
+
+    struct sockaddr_in addr
+    {
+    };
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0)
+    {
+      close(sock);
+      return false;
+    }
+
+    struct timeval tv;
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+    {
+      close(sock);
+      return false;
+    }
+
+    std::string req = "{\"showgps\": true}\n";
+    send(sock, req.c_str(), req.size(), 0);
+    char buf[512] = {0};
+    int n = recv(sock, buf, sizeof(buf) - 1, 0);
+    close(sock);
+    if (n <= 0)
+      return false;
+    buf[n] = '\0';
+
+    // Лёгкий парсер без зависимостей
+    auto findVal = [&](const char *key) -> double
+    {
+      std::string s(buf);
+      size_t pos = s.find(key);
+      if (pos == std::string::npos)
+        return 0.0;
+      pos = s.find(':', pos);
+      if (pos == std::string::npos)
+        return 0.0;
+      try
+      {
+        return std::stod(s.c_str() + pos + 1);
+      }
+      catch (...)
+      {
+        return 0.0;
+      }
+    };
+
+    if (std::string(buf).find("\"status\":\"success\"") == std::string::npos)
+      return false;
+    out_lat = findVal("\"lat\"");
+    out_lon = findVal("\"lon\"");
+    out_alt = findVal("\"alt\"");
+    out_sats = (int)findVal("\"sats\"");
+    return (out_sats > 0 && std::abs(out_lat) > 1e-3);
+  }
+
+  // === Основная авто-последовательность ===
+  void Node::executeAutoModeSequence()
+  {
+    RCLCPP_INFO(this->get_logger(), "🚀 Starting AUTO mode sequence...");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // Сохраняем точку взлёта как NED-начало координат
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (drone_gps_.is_valid)
+      {
+        ref_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};
+        ref_gps_valid_ = true;
+      }
+    }
+
+    // 1. Arm
+    RCLCPP_INFO(this->get_logger(), "🔑 Sending ARM command...");
+    px4_msgs::msg::VehicleCommand arm_cmd;
+    arm_cmd.command = 400;
+    arm_cmd.param1 = 1.0f;
+    arm_cmd.target_system = 1;
+    arm_cmd.target_component = 1;
+    arm_cmd.from_external = true;
+    arm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+    vehicle_cmd_pub_->publish(arm_cmd);
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    // 2. Offboard
+    RCLCPP_INFO(this->get_logger(), "📻 Switching to OFFBOARD...");
+    vehicle_ctrl_->setOffboardMode();
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // 3. Takeoff to 5m @ 7m/s
+    RCLCPP_INFO(this->get_logger(), "🛫 Taking off to 5m altitude...");
+    // 🛠 FIX: Используем float, чтобы убрать warning narrowing conversion
+    float target_z = -5.0f;
+    float vz = -7.0f;
+
+    int cycles = 0;
+    double start_alt = NAN;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (drone_gps_.is_valid)
+        start_alt = drone_gps_.alt;
+    }
+
+    while (cycles < 200)
+    {
+      px4_msgs::msg::TrajectorySetpoint ts;
+      ts.position = {NAN, NAN, target_z};
+      ts.velocity = {NAN, NAN, vz};
+      ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+      trajectory_setpoint_pub_->publish(ts);
+      vehicle_ctrl_->publishOffboardControlMode();
+
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (drone_gps_.is_valid && !std::isnan(start_alt))
+        {
+          // 🛠 FIX: При взлёте высота (MSL) увеличивается. Меняем <= на >=
+          if (drone_gps_.alt >= start_alt + 4.5)
+          {
+            RCLCPP_INFO(this->get_logger(), "✅ Altitude reached.");
+            break;
+          }
+          if (drone_gps_.alt >= start_alt + 2.0 && cycles > 20)
+          {
+            RCLCPP_INFO(this->get_logger(), "✅ Already flying.");
+            break;
+          }
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      cycles++;
+    }
+
+    // 4. Poll targets
+    if (commander_targets_.empty())
+    {
+      RCLCPP_WARN(this->get_logger(), "⚠️ No targets. Aborting.");
+      return;
+    }
+
+    RCLCPP_INFO(this->get_logger(), "📡 Polling %zu targets...", commander_targets_.size());
+    std::string closest_ip;
+    double min_dist = std::numeric_limits<double>::max();
+    double drone_lat = 0, drone_lon = 0, closest_lat = 0, closest_lon = 0, closest_alt = 0;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (drone_gps_.is_valid)
+      {
+        drone_lat = drone_gps_.lat;
+        drone_lon = drone_gps_.lon;
+      }
+    }
+
+    for (const auto &ip : commander_targets_)
+    {
+      double t_lat, t_lon, t_alt;
+      int t_sats;
+      if (queryTargetGPS(ip, target_query_port_, t_lat, t_lon, t_alt, t_sats))
+      {
+        if (std::abs(drone_lat) > 1e-3)
+        {
+          double d = haversineDist(drone_lat, drone_lon, t_lat, t_lon);
+          if (d < min_dist)
+          {
+            min_dist = d;
+            closest_ip = ip;
+            closest_lat = t_lat;
+            closest_lon = t_lon;
+            closest_alt = t_alt;
+          }
+        }
+      }
+      else
+      {
+        RCLCPP_WARN(this->get_logger(), "❌ Timeout/invalid response from %s", ip.c_str());
+      }
+    }
+
+    // 5. Переключаемся в режим GPS-сближения
+    if (!closest_ip.empty())
+    {
+      RCLCPP_INFO(this->get_logger(), "🎯 Closest target: %s (%.1f m). INITIATING GPS APPROACH!", closest_ip.c_str(), min_dist);
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      target_gps_ = {closest_lat, closest_lon, closest_alt};
+      auto_phase_ = AutoPhase::GPS_APPROACH;
+      attack_ready_ = false;
+    }
+    else
+    {
+      RCLCPP_ERROR(this->get_logger(), "🛑 No valid targets found.");
+    }
   }
 
 } // namespace los_guidance
