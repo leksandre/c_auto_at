@@ -5,12 +5,16 @@
 #include <unistd.h>
 #include <cstring>
 #include <algorithm>
+#include <sstream>
 
 namespace los_guidance
 {
 
-  Commander::Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb, rclcpp::Logger logger)
-      : port_(port), attack_callback_(std::move(attack_cb)), auto_mode_callback_(std::move(auto_cb)), logger_(std::move(logger)) {}
+  Commander::Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
+                       GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger)
+      : port_(port), attack_callback_(std::move(attack_cb)),
+        auto_mode_callback_(std::move(auto_cb)), gps_query_callback_(std::move(gps_cb)),
+        home_callback_(std::move(home_cb)), logger_(std::move(logger)) {}
 
   Commander::~Commander() { stop(); }
 
@@ -102,32 +106,86 @@ namespace los_guidance
     if (bytes_read > 0)
     {
       buffer[bytes_read] = '\0';
-      processCommand(std::string(buffer));
+      processCommand(std::string(buffer), client_fd);
     }
     close(client_fd);
   }
 
-  void Commander::processCommand(const std::string &data)
+  void Commander::sendResponse(int fd, const std::string &json)
   {
-    // 🆕 Проверяем set_mode: auto
+    // send(fd, json.c_str(), json.size(), MSG_NOSIGNAL);
+    if (send(fd, json.c_str(), json.size(), MSG_NOSIGNAL) < 0)
+    {
+      RCLCPP_WARN(logger_, "⚠️ Failed to send response to client");
+    }
+  }
+
+  void Commander::processCommand(const std::string &data, int client_fd)
+  {
+    // 🆕 1. Обработка showgps
+    if (data.find("\"showgps\"") != std::string::npos)
+    {
+      double lat = 0, lon = 0, alt = 0;
+      if (gps_query_callback_ && gps_query_callback_(lat, lon, alt))
+      {
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"SHOWGPS\",\"data\":{\"lat\":" << lat
+             << ",\"lon\":" << lon << ",\"alt\":" << alt << "}}\n";
+        sendResponse(client_fd, resp.str());
+        RCLCPP_DEBUG(logger_, "📍 SHOWGPS response sent: %.6f, %.6f, %.2f", lat, lon, alt);
+      }
+      else
+      {
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"SHOWGPS\",\"message\":\"GPS not available\"}\n");
+        RCLCPP_WARN(logger_, "⚠️ SHOWGPS: GPS data not available");
+      }
+      return;
+    }
+
+    if (data.find("\"home\"") != std::string::npos)
+    {
+      RCLCPP_INFO(logger_, "🏠 Received command: home");
+      if (home_callback_)
+      {
+        HomeData hd = home_callback_();
+        if (hd.valid)
+        {
+          std::ostringstream resp;
+          resp << "{\"status\":\"accepted\",\"command\":\"HOME\",\"data\":{\"home_lat\":" << hd.lat
+               << ",\"home_lon\":" << hd.lon << ",\"home_alt\":" << hd.alt << "}}\n";
+          sendResponse(client_fd, resp.str());
+        }
+        else
+        {
+          sendResponse(client_fd, "{\"status\":\"accepted\",\"command\":\"HOME\",\"data\":{\"home_lat\":0,\"home_lon\":0,\"home_alt\":0}}\n");
+        }
+      }
+      return;
+    }
+
+    // 2. Обработка set_mode: auto
     if (data.find("\"set_mode\"") != std::string::npos && data.find("auto") != std::string::npos)
     {
       RCLCPP_INFO(logger_, "🤖 Received command: set_mode auto");
       if (auto_mode_callback_)
         auto_mode_callback_();
+      sendResponse(client_fd, "{\"status\":\"success\",\"command\":\"SET_MODE\",\"mode\":\"auto\"}\n");
       return;
     }
-    // Обычная команда атаки
+
+    // 3. Обычная команда атаки
     bool attack_cmd = false;
     if (parseAttackCommand(data, attack_cmd))
     {
       RCLCPP_INFO(logger_, "🎯 Received attack command: %s", attack_cmd ? "START" : "STOP");
       if (attack_callback_)
         attack_callback_(attack_cmd);
+      sendResponse(client_fd, attack_cmd ? "{\"status\":\"success\",\"command\":\"START_ATTACK\"}\n" : "{\"status\":\"success\",\"command\":\"STOP_ATTACK\"}\n");
     }
     else
     {
       RCLCPP_WARN(logger_, "⚠️ Invalid command format: %s", data.c_str());
+      sendResponse(client_fd, "{\"status\":\"error\",\"message\":\"Unknown command\"}\n");
     }
   }
 

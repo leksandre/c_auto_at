@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-04-04 21:25:38
+Дата: 2026-04-04 23:25:19
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -129,7 +129,7 @@ private:
 #endif  // LOS_GUIDANCE_ADRC_HPP_
 ================================================================================
 Файл: ./include/los_guidance/commander.hpp
-Строк: 40
+Строк: 47
 ================================================================================
 
 #ifndef LOS_GUIDANCE_COMMANDER_HPP_
@@ -143,36 +143,43 @@ private:
 
 namespace los_guidance
 {
+class Commander
+{
+public:
+  using AttackCallback = std::function<void(bool)>;
+  using AutoModeCallback = std::function<void()>;
+  using GpsQueryCallback = std::function<bool(double&, double&, double&)>;
+  
+  // 🆕 Домашняя точка
+  struct HomeData { double lat{0}, lon{0}, alt{0}; bool valid{false}; };
+  using HomeCallback = std::function<HomeData()>;
 
-  class Commander
-  {
-  public:
-    using AttackCallback = std::function<void(bool)>;
-    using AutoModeCallback = std::function<void()>;
+  explicit Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
+                     GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger);
+  ~Commander();
 
-    explicit Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb, rclcpp::Logger logger);
-    ~Commander();
+  void start();
+  void stop();
 
-    void start();
-    void stop();
+private:
+  void listenLoop();
+  void handleConnection(int client_fd);
+  void processCommand(const std::string &data, int client_fd);
+  bool parseAttackCommand(const std::string &data, bool &result);
+  void sendResponse(int fd, const std::string &json);
 
-  private:
-    void listenLoop();
-    void handleConnection(int client_fd);
-    void processCommand(const std::string &data);
-    bool parseAttackCommand(const std::string &data, bool &result);
-
-    int port_;
-    AttackCallback attack_callback_;
-    AutoModeCallback auto_mode_callback_; // 🆕 Новый колбэк
-    rclcpp::Logger logger_;
-    std::thread listen_thread_;
-    std::atomic<bool> running_{false};
-    int server_fd_ = -1;
-  };
-
+  int port_;
+  AttackCallback attack_callback_;
+  AutoModeCallback auto_mode_callback_;
+  GpsQueryCallback gps_query_callback_;
+  HomeCallback home_callback_; // 🆕
+  rclcpp::Logger logger_;
+  std::thread listen_thread_;
+  std::atomic<bool> running_{false};
+  int server_fd_ = -1;
+};
 } // namespace los_guidance
-#endif // LOS_GUIDANCE_COMMANDER_HPP_
+#endif
 ================================================================================
 Файл: ./include/los_guidance/guidance_config.hpp
 Строк: 91
@@ -920,7 +927,7 @@ private:
 #endif // LOS_GUIDANCE_LOS_ESTIMATOR_HPP_
 ================================================================================
 Файл: ./include/los_guidance/node.hpp
-Строк: 392
+Строк: 403
 ================================================================================
 
 /**
@@ -933,9 +940,7 @@ private:
  * @copyright BSD 3-Clause License
  */
 
-
-
- #ifndef LOS_GUIDANCE_NODE_HPP_
+#ifndef LOS_GUIDANCE_NODE_HPP_
 #define LOS_GUIDANCE_NODE_HPP_
 
 #pragma once
@@ -980,8 +985,6 @@ private:
 #include "los_guidance/sensor_sync.hpp"
 #include "los_guidance/adrc.hpp"
 #include "los_guidance/commander.hpp"
-
-
 
 namespace los_guidance
 {
@@ -1112,6 +1115,16 @@ namespace los_guidance
      * @brief Деструктор
      */
     ~Node() = default;
+
+    /**
+     * @brief Мгновенное чтение текущих координат из кэша (без блокировки надолго)
+     * @param[out] lat Широта (градусы)
+     * @param[out] lon Долгота (градусы)
+     * @param[out] alt Высота (метры, MSL)
+     * @return true если данные валидны
+     * @note Читает из кэша, работает в любом режиме полёта
+     */
+    bool getDroneGps(double &lat, double &lon, double &alt) const;
 
   private:
     // === Инициализация ===
@@ -1244,6 +1257,10 @@ namespace los_guidance
     // === ROS2 Timer ===
     rclcpp::TimerBase::SharedPtr timer_;
 
+    // === Добавьте после существующих полей ===
+    double start_lat_{0.0}, start_lon_{0.0}, start_alt_{0.0};
+    bool start_gps_valid_{false};
+
     // === Состояние (защищено mutex) ===
     mutable std::mutex state_mutex_;  ///< Защита состояния
     bool attack_enabled_{false};      ///< Авто-атака включена
@@ -1276,6 +1293,9 @@ namespace los_guidance
     {
       double lat, lon, alt;
     } target_gps_ = {0, 0, 0};
+
+    std::string closest_target_ip_;
+
     struct
     {
       double lat, lon, alt;
@@ -1295,11 +1315,10 @@ namespace los_guidance
 
     std::unique_ptr<Commander> commander_;
     bool commander_enabled_{false};
-    int commander_port_{11471};
+    int commander_port_{11472};
 
     rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr gps_pos_sub_;
     void vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
-
 
     void executeAutoModeSequence();
     static double haversineDist(double lat1, double lon1, double lat2, double lon2);
@@ -1307,7 +1326,6 @@ namespace los_guidance
   };
 
   // === Математика расстояний (Haversine) ===
- 
 
   static double haversineDist(double lat1, double lon1, double lat2, double lon2);
   static bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
@@ -2038,7 +2056,7 @@ private:
 
 ================================================================================
 Файл: ./src/commander.cpp
-Строк: 156
+Строк: 214
 ================================================================================
 
 #include "los_guidance/commander.hpp"
@@ -2048,12 +2066,16 @@ private:
 #include <unistd.h>
 #include <cstring>
 #include <algorithm>
+#include <sstream>
 
 namespace los_guidance
 {
 
-  Commander::Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb, rclcpp::Logger logger)
-      : port_(port), attack_callback_(std::move(attack_cb)), auto_mode_callback_(std::move(auto_cb)), logger_(std::move(logger)) {}
+  Commander::Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
+                       GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger)
+      : port_(port), attack_callback_(std::move(attack_cb)),
+        auto_mode_callback_(std::move(auto_cb)), gps_query_callback_(std::move(gps_cb)),
+        home_callback_(std::move(home_cb)), logger_(std::move(logger)) {}
 
   Commander::~Commander() { stop(); }
 
@@ -2145,32 +2167,86 @@ namespace los_guidance
     if (bytes_read > 0)
     {
       buffer[bytes_read] = '\0';
-      processCommand(std::string(buffer));
+      processCommand(std::string(buffer), client_fd);
     }
     close(client_fd);
   }
 
-  void Commander::processCommand(const std::string &data)
+  void Commander::sendResponse(int fd, const std::string &json)
   {
-    // 🆕 Проверяем set_mode: auto
+    // send(fd, json.c_str(), json.size(), MSG_NOSIGNAL);
+    if (send(fd, json.c_str(), json.size(), MSG_NOSIGNAL) < 0)
+    {
+      RCLCPP_WARN(logger_, "⚠️ Failed to send response to client");
+    }
+  }
+
+  void Commander::processCommand(const std::string &data, int client_fd)
+  {
+    // 🆕 1. Обработка showgps
+    if (data.find("\"showgps\"") != std::string::npos)
+    {
+      double lat = 0, lon = 0, alt = 0;
+      if (gps_query_callback_ && gps_query_callback_(lat, lon, alt))
+      {
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"SHOWGPS\",\"data\":{\"lat\":" << lat
+             << ",\"lon\":" << lon << ",\"alt\":" << alt << "}}\n";
+        sendResponse(client_fd, resp.str());
+        RCLCPP_DEBUG(logger_, "📍 SHOWGPS response sent: %.6f, %.6f, %.2f", lat, lon, alt);
+      }
+      else
+      {
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"SHOWGPS\",\"message\":\"GPS not available\"}\n");
+        RCLCPP_WARN(logger_, "⚠️ SHOWGPS: GPS data not available");
+      }
+      return;
+    }
+
+    if (data.find("\"home\"") != std::string::npos)
+    {
+      RCLCPP_INFO(logger_, "🏠 Received command: home");
+      if (home_callback_)
+      {
+        HomeData hd = home_callback_();
+        if (hd.valid)
+        {
+          std::ostringstream resp;
+          resp << "{\"status\":\"accepted\",\"command\":\"HOME\",\"data\":{\"home_lat\":" << hd.lat
+               << ",\"home_lon\":" << hd.lon << ",\"home_alt\":" << hd.alt << "}}\n";
+          sendResponse(client_fd, resp.str());
+        }
+        else
+        {
+          sendResponse(client_fd, "{\"status\":\"accepted\",\"command\":\"HOME\",\"data\":{\"home_lat\":0,\"home_lon\":0,\"home_alt\":0}}\n");
+        }
+      }
+      return;
+    }
+
+    // 2. Обработка set_mode: auto
     if (data.find("\"set_mode\"") != std::string::npos && data.find("auto") != std::string::npos)
     {
       RCLCPP_INFO(logger_, "🤖 Received command: set_mode auto");
       if (auto_mode_callback_)
         auto_mode_callback_();
+      sendResponse(client_fd, "{\"status\":\"success\",\"command\":\"SET_MODE\",\"mode\":\"auto\"}\n");
       return;
     }
-    // Обычная команда атаки
+
+    // 3. Обычная команда атаки
     bool attack_cmd = false;
     if (parseAttackCommand(data, attack_cmd))
     {
       RCLCPP_INFO(logger_, "🎯 Received attack command: %s", attack_cmd ? "START" : "STOP");
       if (attack_callback_)
         attack_callback_(attack_cmd);
+      sendResponse(client_fd, attack_cmd ? "{\"status\":\"success\",\"command\":\"START_ATTACK\"}\n" : "{\"status\":\"success\",\"command\":\"STOP_ATTACK\"}\n");
     }
     else
     {
       RCLCPP_WARN(logger_, "⚠️ Invalid command format: %s", data.c_str());
+      sendResponse(client_fd, "{\"status\":\"error\",\"message\":\"Unknown command\"}\n");
     }
   }
 
@@ -3197,7 +3273,7 @@ int main(int argc, char **argv) {
 }
 ================================================================================
 Файл: ./src/node.cpp
-Строк: 1166
+Строк: 1298
 ================================================================================
 
 /**
@@ -3410,9 +3486,9 @@ namespace los_guidance
 
     // === Commander параметры ===
     this->declare_parameter("commander.enable", false);
-    this->declare_parameter("commander.port", 11471);
+    this->declare_parameter("commander.port", 11472);
     this->declare_parameter("commander.targets", std::vector<std::string>{}); // 🆕
-    this->declare_parameter("commander.target_port", 11472);                  // 🆕
+    this->declare_parameter("commander.target_port", 11471);                  // 🆕
 
     commander_enabled_ = this->get_parameter("commander.enable").as_bool();
     commander_port_ = static_cast<int>(this->get_parameter("commander.port").as_int());
@@ -3501,6 +3577,7 @@ namespace los_guidance
     sensor_sync_->registerSource(ang_rate_sync_key_);
 
     // === 6. Commander (сетевые команды атаки) ===
+
     if (commander_enabled_)
     {
       commander_ = std::make_unique<Commander>(
@@ -3513,8 +3590,58 @@ namespace los_guidance
           },
           [this]()
           {
-            // 🆕 Запускаем авто-последовательность в отдельном потоке
             std::thread(&Node::executeAutoModeSequence, this).detach();
+          },
+          [this](double &lat, double &lon, double &alt) -> bool
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (!drone_gps_.is_valid)
+              return false;
+            lat = drone_gps_.lat;
+            lon = drone_gps_.lon;
+            alt = drone_gps_.alt;
+            return true;
+          },
+          // 🆕 Колбэк для команды HOME
+          [this]() -> Commander::HomeData
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            Commander::HomeData hd;
+            hd.lat = start_lat_;
+            hd.lon = start_lon_;
+            hd.alt = start_alt_;
+            hd.valid = start_gps_valid_;
+
+            // Сбрасываем текущую миссию
+            auto_phase_ = AutoPhase::IDLE;
+            start_attack_ = false;
+            attack_enabled_ = false;
+
+            if (hd.valid)
+            {
+              RCLCPP_INFO(this->get_logger(), "🏠 RTL triggered. Home: %.6f, %.6f, %.1f", start_lat_, start_lon_, start_alt_);
+              px4_msgs::msg::VehicleCommand cmd;
+              cmd.command = 20; // MAV_CMD_NAV_RETURN_TO_LAUNCH
+              cmd.param1 = 0.0;
+              cmd.target_system = 1;
+              cmd.target_component = 1;
+              cmd.from_external = true;
+              cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+              vehicle_cmd_pub_->publish(cmd);
+            }
+            else
+            {
+              RCLCPP_WARN(this->get_logger(), "🏠 No home coordinates! Triggering emergency LAND.");
+              px4_msgs::msg::VehicleCommand cmd;
+              cmd.command = 21; // MAV_CMD_NAV_LAND
+              cmd.param1 = 0.0;
+              cmd.target_system = 1;
+              cmd.target_component = 1;
+              cmd.from_external = true;
+              cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+              vehicle_cmd_pub_->publish(cmd);
+            }
+            return hd;
           },
           this->get_logger());
       commander_->start();
@@ -3983,7 +4110,7 @@ namespace los_guidance
 
   void Node::controlLoopTimerCallback()
   {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    std::unique_lock<std::mutex> lock(state_mutex_);// блять блочит весь цикл...
 
     // === ФАЗА 1: СБЛИЖЕНИЕ ПО GPS ===
     if (auto_phase_ == AutoPhase::GPS_APPROACH)
@@ -4003,6 +4130,35 @@ namespace los_guidance
                                      target_gps_.lat, target_gps_.lon);
       }
 
+      // 🆕 Логирование фаз
+      std::string phase_name = (auto_phase_ == AutoPhase::GPS_APPROACH) ? "GPS" : (auto_phase_ == AutoPhase::VISUAL_ATTACK) ? "VISUAL"
+                                                                                                                            : "IDLE";
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                           "🔄 Phase: %s | Dist: %.1fm | Camera: %s",
+                           phase_name.c_str(), current_dist, camera_locked ? "LOCKED" : "SEARCHING");
+
+      static int poll_counter = 0;
+      if (++poll_counter >= 250)
+      {
+        poll_counter = 0;
+        // 1. Копируем IP и отпускаем мьютекс перед TCP
+        std::string ip_to_poll = closest_target_ip_;
+        lock.unlock(); // 🔓 Временно освобождаем
+
+        // 2. TCP вызов (не блокирует мьютекс)
+        double t_lat, t_lon, t_alt;
+        int t_sats;
+        if (!ip_to_poll.empty() &&
+            queryTargetGPS(ip_to_poll, target_query_port_, t_lat, t_lon, t_alt, t_sats))
+        {
+          lock.lock(); // 🔒 Захватываем обратно для записи
+          target_gps_ = {t_lat, t_lon, t_alt};
+          RCLCPP_INFO(this->get_logger(), "📡 Target GPS updated: %.6f, %.6f", t_lat, t_lon);
+          lock.unlock(); // 🔓 Сразу отпускаем, чтобы не тормозить публикацию
+          lock.lock();   // 🔒 Возвращаем для продолжения работы функции
+        }
+      }
+
       // Условие перехода в атаку: камера видит цель И расстояние < 200м
       if (camera_locked && current_dist < 200.0)
       {
@@ -4020,48 +4176,61 @@ namespace los_guidance
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                              "🚁 Approaching... Dist: %.1fm | Camera: %s",
                              current_dist, camera_locked ? "LOCKED" : "SEARCHING");
-        return;
+        // без!!! return; здесь. Пусть функция завершится естественно.
       }
     }
 
     // === ФАЗА 2: ВИЗУАЛЬНАЯ АТАКА (LOS Guidance) ===
+
     if (auto_phase_ == AutoPhase::VISUAL_ATTACK)
     {
       if (!attack_ready_)
       {
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "⚠️ Target lost during attack!");
-        return; // Дрон остановит ускорения, PX4 перейдёт в Hover
-      }
-
-      bool should_attack = (start_attack_ || attack_enabled_);
-      if (should_attack)
-      {
-        if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD)
-        {
-          update_acc_setpoint_ = true;
-          vehicle_ctrl_->publishOffboardControlMode();
-          vehicle_ctrl_->publishAccelerationSetpoint(guidance_ctrl_->getLastAccelerationCommand());
-        }
-        else
-        {
-          guidance_ctrl_->reset();
-          vehicle_ctrl_->publishOffboardControlMode();
-          vehicle_ctrl_->publishAccelerationSetpoint(guidance_ctrl_->getLastAccelerationCommand());
-          vehicle_ctrl_->setOffboardMode();
-        }
+        // 🔄 Цель потеряна — возвращаемся к подлёту по GPS (не останавливаемся!)
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                             "⚠️ Target lost! Returning to GPS_APPROACH (target_gps_ preserved)");
+        auto_phase_ = AutoPhase::GPS_APPROACH;
+        start_attack_ = false;
+        attack_enabled_ = false;
+        // ❗ Не делаем return — проваливаемся в логику GPS_APPROACH ниже
       }
       else
       {
-        if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD && update_acc_setpoint_)
+        // Цель видима — выполняем визуальную атаку
+        bool should_attack = (start_attack_ || attack_enabled_);
+        if (should_attack)
         {
-          guidance_ctrl_->reset();
-          vehicle_ctrl_->setManualMode();
-          update_acc_setpoint_ = false;
-          auto_phase_ = AutoPhase::IDLE;
-          RCLCPP_INFO(this->get_logger(), "Attack stopped, switched to MANUAL");
+          if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD)
+          {
+            update_acc_setpoint_ = true;
+            vehicle_ctrl_->publishOffboardControlMode();
+            vehicle_ctrl_->publishAccelerationSetpoint(
+                guidance_ctrl_->getLastAccelerationCommand());
+          }
+          else
+          {
+            guidance_ctrl_->reset();
+            vehicle_ctrl_->publishOffboardControlMode();
+            vehicle_ctrl_->publishAccelerationSetpoint(
+                guidance_ctrl_->getLastAccelerationCommand());
+            vehicle_ctrl_->setOffboardMode();
+          }
         }
+        else
+        {
+          if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD && update_acc_setpoint_)
+          {
+            guidance_ctrl_->reset();
+            vehicle_ctrl_->setManualMode();
+            update_acc_setpoint_ = false;
+            auto_phase_ = AutoPhase::IDLE;
+            RCLCPP_INFO(this->get_logger(), "Attack stopped, switched to MANUAL");
+          }
+        }
+        return; // ✅ Выходим только если цель видима или атака остановлена вручную
       }
-      return;
+      // Если мы здесь → цель потеряна, фаза сменилась на GPS_APPROACH
+      // ↓↓↓ Проваливаемся в код фазы ниже (не прерываем выполнение)
     }
 
     // === ФАЗА 3: ЛЕГАСИ / РУЧНОЙ ТРИГГЕР (TCP start_attack / RC) ===
@@ -4136,6 +4305,13 @@ namespace los_guidance
     double dlat = (lat - ref_lat) * M_PI / 180.0;
     double dlon = (lon - ref_lon) * M_PI / 180.0;
 
+    double dist = haversineDist(ref_lat, ref_lon, lat, lon);
+    if (dist > 3000.0)
+    {
+      // RCLCPP_WARN(logger_, "⚠️ Large distance %.1fm may cause NED projection errors", dist);
+      std::cerr << "[WARN] Large distance " << dist << "m may cause NED projection errors\n";
+    }
+
     // Простая проекция на плоскость (валидна для дистанций < 2-3 км)
 
     // double x = dlon * 6371000.0 * std::cos(ref_lat * M_PI / 180.0); // East
@@ -4180,8 +4356,8 @@ namespace los_guidance
     }
 
     struct timeval tv;
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
+    tv.tv_sec = 0;
+    tv.tv_usec = 200000; // 200 мс вместо 2 с
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
@@ -4214,14 +4390,27 @@ namespace los_guidance
       {
         return std::stod(s.c_str() + pos + 1);
       }
-      catch (...)
+      // catch (...)
+      // {
+      //   return 0.0;
+      // }
+      catch (const std::exception &e)
       {
+        // RCLCPP_WARN(logger_, "⚠️ Parse error for key '%s': %s", key, e.what());
+        std::cerr << "[WARN] Parse error for key in json " << key << "  !!errors\n";
         return 0.0;
       }
     };
 
-    if (std::string(buf).find("\"status\":\"success\"") == std::string::npos)
+    // if (std::string(buf).find("\"status\":\"success\"") == std::string::npos)
+    //   return false;
+
+    std::string data(buf);
+    if (data.find("\"status\"") == std::string::npos || data.find("success") == std::string::npos)
+    {
       return false;
+    }
+
     out_lat = findVal("\"lat\"");
     out_lon = findVal("\"lon\"");
     out_alt = findVal("\"alt\"");
@@ -4236,14 +4425,20 @@ namespace los_guidance
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     // Сохраняем точку взлёта как NED-начало координат
+    // 🆕 Сохраняем полную стартовую позицию (lat/lon/alt)
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       if (drone_gps_.is_valid)
       {
-        ref_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};
-        ref_gps_valid_ = true;
+        start_lat_ = drone_gps_.lat;
+        start_lon_ = drone_gps_.lon;
+        start_alt_ = drone_gps_.alt;
+        start_gps_valid_ = true;
       }
     }
+    double start_alt = NAN;
+    if (start_gps_valid_)
+      start_alt = start_alt_;
 
     // 1. Arm
     RCLCPP_INFO(this->get_logger(), "🔑 Sending ARM command...");
@@ -4269,7 +4464,7 @@ namespace los_guidance
     float vz = -7.0f;
 
     int cycles = 0;
-    double start_alt = NAN;
+
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       if (drone_gps_.is_valid)
@@ -4357,6 +4552,7 @@ namespace los_guidance
       RCLCPP_INFO(this->get_logger(), "🎯 Closest target: %s (%.1f m). INITIATING GPS APPROACH!", closest_ip.c_str(), min_dist);
       std::lock_guard<std::mutex> lock(state_mutex_);
       target_gps_ = {closest_lat, closest_lon, closest_alt};
+      closest_target_ip_ = closest_ip; // 🆕 Сохраняем IP для периодического опроса
       auto_phase_ = AutoPhase::GPS_APPROACH;
       attack_ready_ = false;
     }
@@ -4364,6 +4560,18 @@ namespace los_guidance
     {
       RCLCPP_ERROR(this->get_logger(), "🛑 No valid targets found.");
     }
+  }
+
+  // === Публичный метод для мгновенного чтения GPS ===
+  bool Node::getDroneGps(double &lat, double &lon, double &alt) const
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (!drone_gps_.is_valid)
+      return false;
+    lat = drone_gps_.lat;
+    lon = drone_gps_.lon;
+    alt = drone_gps_.alt;
+    return true;
   }
 
 } // namespace los_guidance
@@ -5688,5 +5896,5 @@ def generate_launch_description():
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 5531
+Всего строк: 5739
 ================================================================================

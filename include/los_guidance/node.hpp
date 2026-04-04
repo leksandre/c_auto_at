@@ -8,9 +8,7 @@
  * @copyright BSD 3-Clause License
  */
 
-
-
- #ifndef LOS_GUIDANCE_NODE_HPP_
+#ifndef LOS_GUIDANCE_NODE_HPP_
 #define LOS_GUIDANCE_NODE_HPP_
 
 #pragma once
@@ -55,8 +53,6 @@
 #include "los_guidance/sensor_sync.hpp"
 #include "los_guidance/adrc.hpp"
 #include "los_guidance/commander.hpp"
-
-
 
 namespace los_guidance
 {
@@ -187,6 +183,16 @@ namespace los_guidance
      * @brief Деструктор
      */
     ~Node() = default;
+
+    /**
+     * @brief Мгновенное чтение текущих координат из кэша (без блокировки надолго)
+     * @param[out] lat Широта (градусы)
+     * @param[out] lon Долгота (градусы)
+     * @param[out] alt Высота (метры, MSL)
+     * @return true если данные валидны
+     * @note Читает из кэша, работает в любом режиме полёта
+     */
+    bool getDroneGps(double &lat, double &lon, double &alt) const;
 
   private:
     // === Инициализация ===
@@ -319,6 +325,10 @@ namespace los_guidance
     // === ROS2 Timer ===
     rclcpp::TimerBase::SharedPtr timer_;
 
+    // === Добавьте после существующих полей ===
+    double start_lat_{0.0}, start_lon_{0.0}, start_alt_{0.0};
+    bool start_gps_valid_{false};
+
     // === Состояние (защищено mutex) ===
     mutable std::mutex state_mutex_;  ///< Защита состояния
     bool attack_enabled_{false};      ///< Авто-атака включена
@@ -351,6 +361,9 @@ namespace los_guidance
     {
       double lat, lon, alt;
     } target_gps_ = {0, 0, 0};
+
+    std::string closest_target_ip_;
+
     struct
     {
       double lat, lon, alt;
@@ -370,11 +383,10 @@ namespace los_guidance
 
     std::unique_ptr<Commander> commander_;
     bool commander_enabled_{false};
-    int commander_port_{11471};
+    int commander_port_{11472};
 
     rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr gps_pos_sub_;
     void vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
-
 
     void executeAutoModeSequence();
     static double haversineDist(double lat1, double lon1, double lat2, double lon2);
@@ -382,7 +394,6 @@ namespace los_guidance
   };
 
   // === Математика расстояний (Haversine) ===
- 
 
   static double haversineDist(double lat1, double lon1, double lat2, double lon2);
   static bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
