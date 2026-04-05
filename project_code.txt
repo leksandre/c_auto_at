@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-04-04 23:25:19
+Дата: 2026-04-05 18:25:27
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -3273,7 +3273,7 @@ int main(int argc, char **argv) {
 }
 ================================================================================
 Файл: ./src/node.cpp
-Строк: 1298
+Строк: 1302
 ================================================================================
 
 /**
@@ -3504,6 +3504,10 @@ namespace los_guidance
     config_.sync_retention_us = this->get_parameter("sync.retention_us").as_int();
 
     RCLCPP_INFO(this->get_logger(), "Parameters loaded successfully");
+    commander_enabled_ = this->get_parameter("commander.enable").as_bool();
+RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d", 
+            commander_enabled_ ? "TRUE" : "FALSE", commander_port_);
+            
   }
 
   void Node::initializeControllers()
@@ -5642,7 +5646,7 @@ FlightMode VehicleController::navStateToFlightMode_(uint8_t nav_state) const {
 los_guidance_node:
   ros__parameters:
     # === Tracker ===
-    tracker:
+    camera:
       # Камера
       fx: 410.0
       fy: 410.0
@@ -5756,7 +5760,7 @@ los_guidance_node:
 
     commander:
       enable: true
-      port: 11471
+      port: 11472
       targets: ["192.168.11.181", "192.168.11.183", "192.168.11.184"]
       target_port: 11471  # Порт, на котором цели слушают запросы SHOWGPS
 
@@ -5896,5 +5900,5 @@ def generate_launch_description():
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 5739
+Всего строк: 5743
 ================================================================================

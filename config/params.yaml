@@ -1,7 +1,7 @@
 los_guidance_node:
   ros__parameters:
     # === Tracker ===
-    tracker:
+    camera:
       # Камера
       fx: 410.0
       fy: 410.0
@@ -18,7 +18,7 @@ los_guidance_node:
       # Фильтрация ⬇️ УВЕЛИЧЕНО для тяжёлого дрона
       pixel_smooth_alpha: 0.5      # ↑ Было 0.3 (↑67%)
       los_smooth_alpha: 0.2        # ↑ Было 0.1 (↑100%)
-      min_confidence: 0.6          # ↑ Было 0.5 (строже)
+      min_confidence: 0.6          # ↑ Было 0.5 (строже)vj
     
     # === Kalman Filter LOS ===
     kalman:
@@ -115,6 +115,6 @@ los_guidance_node:
 
     commander:
       enable: true
-      port: 11471
+      port: 11472
       targets: ["192.168.11.181", "192.168.11.183", "192.168.11.184"]
       target_port: 11471  # Порт, на котором цели слушают запросы SHOWGPS

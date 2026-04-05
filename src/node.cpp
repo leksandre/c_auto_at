@@ -226,6 +226,10 @@ namespace los_guidance
     config_.sync_retention_us = this->get_parameter("sync.retention_us").as_int();
 
     RCLCPP_INFO(this->get_logger(), "Parameters loaded successfully");
+    commander_enabled_ = this->get_parameter("commander.enable").as_bool();
+RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d", 
+            commander_enabled_ ? "TRUE" : "FALSE", commander_port_);
+            
   }
 
   void Node::initializeControllers()
