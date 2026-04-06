@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-04-05 18:25:27
+Дата: 2026-04-06 21:34:33
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -1336,7 +1336,7 @@ namespace los_guidance
 #endif // LOS_GUIDANCE_NODE_HPP_
 ================================================================================
 Файл: ./include/los_guidance/sensor_sync.hpp
-Строк: 77
+Строк: 78
 ================================================================================
 
 /**
@@ -1410,7 +1410,8 @@ private:
   SyncConfig config_;
   std::map<std::string, std::deque<std::pair<uint64_t, std::shared_ptr<void>>>> buffers_;
   mutable std::mutex mutex_;  // Защита буферов
-  
+  size_t sync_count_{0};      // Счётчик синхронизаций
+
   std::shared_ptr<void> getNearest_(const std::string& source, uint64_t ref);
   void dropUntil_(const std::string& source, uint64_t ref_time);
 };
@@ -3273,7 +3274,7 @@ int main(int argc, char **argv) {
 }
 ================================================================================
 Файл: ./src/node.cpp
-Строк: 1302
+Строк: 1373
 ================================================================================
 
 /**
@@ -4119,6 +4120,16 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
     // === ФАЗА 1: СБЛИЖЕНИЕ ПО GPS ===
     if (auto_phase_ == AutoPhase::GPS_APPROACH)
     {
+      // 🆕 Инициализируем ref_gps_ при первом входе (если ещё не установлен)
+      if (!ref_gps_valid_ && drone_gps_.is_valid)
+      {
+        ref_gps_.lat = drone_gps_.lat;
+        ref_gps_.lon = drone_gps_.lon;
+        ref_gps_.alt = drone_gps_.alt;
+        ref_gps_valid_ = true;
+        RCLCPP_INFO(this->get_logger(), "📍 Reference GPS set: %.6f, %.6f, %.2f", ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+      }
+
       if (ref_gps_valid_)
       {
         // Конвертируем цель в локальные NED-координаты относительно точки взлёта
@@ -4145,21 +4156,66 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
       if (++poll_counter >= 250)
       {
         poll_counter = 0;
-        // 1. Копируем IP и отпускаем мьютекс перед TCP
-        std::string ip_to_poll = closest_target_ip_;
-        lock.unlock(); // 🔓 Временно освобождаем
 
-        // 2. TCP вызов (не блокирует мьютекс)
-        double t_lat, t_lon, t_alt;
-        int t_sats;
-        if (!ip_to_poll.empty() &&
-            queryTargetGPS(ip_to_poll, target_query_port_, t_lat, t_lon, t_alt, t_sats))
+        // 🆕 Если цели нет (hover mode) — опрашиваем ВСЕ цели в поисках рабочей
+        if (closest_target_ip_.empty() && !commander_targets_.empty())
         {
-          lock.lock(); // 🔒 Захватываем обратно для записи
-          target_gps_ = {t_lat, t_lon, t_alt};
-          RCLCPP_INFO(this->get_logger(), "📡 Target GPS updated: %.6f, %.6f", t_lat, t_lon);
-          lock.unlock(); // 🔓 Сразу отпускаем, чтобы не тормозить публикацию
-          lock.lock();   // 🔒 Возвращаем для продолжения работы функции
+          RCLCPP_INFO(this->get_logger(), "🔍 Scanning all targets for available target...");
+          std::string found_ip;
+          double found_lat = 0, found_lon = 0, found_alt = 0;
+          double my_lat = 0; //, my_lon = 0;
+          {
+            std::lock_guard<std::mutex> gps_lock(state_mutex_);
+            if (drone_gps_.is_valid)
+            {
+              my_lat = drone_gps_.lat;
+              my_lon = drone_gps_.lon;
+            }
+          }
+
+          for (const auto &ip : commander_targets_)
+          {
+            double t_lat, t_lon, t_alt;
+            int t_sats;
+            if (queryTargetGPS(ip, target_query_port_, t_lat, t_lon, t_alt, t_sats))
+            {
+              RCLCPP_INFO(this->get_logger(), "✅ Found available target: %s", ip.c_str());
+              found_ip = ip;
+              found_lat = t_lat;
+              found_lon = t_lon;
+              found_alt = t_alt;
+              break;
+            }
+          }
+
+          lock.lock();
+          if (!found_ip.empty() && std::abs(my_lat) > 1e-3)
+          {
+            target_gps_ = {found_lat, found_lon, found_alt};
+            closest_target_ip_ = found_ip;
+            RCLCPP_INFO(this->get_logger(), "🎯 Target acquired: %s. Starting approach!", found_ip.c_str());
+            // ref_gps будет обновлён при следующем входе в callback
+          }
+          lock.unlock();
+          lock.lock();
+        }
+        else if (!closest_target_ip_.empty())
+        {
+          // 1. Копируем IP и отпускаем мьютекс перед TCP
+          std::string ip_to_poll = closest_target_ip_;
+          lock.unlock(); // 🔓 Временно освобождаем
+
+          // 2. TCP вызов (не блокирует мьютекс)
+          double t_lat, t_lon, t_alt;
+          int t_sats;
+          if (queryTargetGPS(ip_to_poll, target_query_port_, t_lat, t_lon, t_alt, t_sats))
+          {
+            lock.lock(); // 🔒 Захватываем обратно для записи
+            target_gps_ = {t_lat, t_lon, t_alt};
+            RCLCPP_INFO(this->get_logger(), "📡 Target GPS updated: %.6f, %.6f", t_lat, t_lon);
+            lock.unlock(); // 🔓 Сразу отпускаем, чтобы не тормозить публикацию
+            lock.lock();   // 🔒 Возвращаем для продолжения работы функции
+          }
         }
       }
 
@@ -4475,7 +4531,7 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
         start_alt = drone_gps_.alt;
     }
 
-    while (cycles < 200)
+    while (cycles < 1200)
     {
       px4_msgs::msg::TrajectorySetpoint ts;
       ts.position = {NAN, NAN, target_z};
@@ -4562,7 +4618,23 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
     }
     else
     {
-      RCLCPP_ERROR(this->get_logger(), "🛑 No valid targets found.");
+      // 🆕 Цели не найдены — переводим дрон в режим зависания на текущей позиции
+      // и продолжаем периодически опрашивать цели в основном цикле
+      RCLCPP_WARN(this->get_logger(), "🛑 No valid targets found. Entering HOVER mode and will keep polling...");
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      // Устанавливаем цель = текущая позиция дрона (дрон будет зависать на месте)
+      if (drone_gps_.is_valid)
+      {
+        target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};
+      }
+      else
+      {
+        // Если GPS дрона недоступен, используем точку взлёта
+        target_gps_ = {start_lat_, start_lon_, start_alt_ + 5.0};
+      }
+      closest_target_ip_ = ""; // Пока нет цели
+      auto_phase_ = AutoPhase::GPS_APPROACH;
+      attack_ready_ = false;
     }
   }
 
@@ -4581,7 +4653,7 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
 } // namespace los_guidance
 ================================================================================
 Файл: ./src/sensor_sync.cpp
-Строк: 156
+Строк: 159
 ================================================================================
 
 /**
@@ -4606,7 +4678,7 @@ namespace los_guidance {
 // ============================================================================
 
 SensorSync::SensorSync(const SyncConfig& config)
-  : config_(config)
+  : config_(config), sync_count_(0)
 {
 }
 
@@ -4664,22 +4736,25 @@ void SensorSync::addMessage(
 
 std::map<std::string, std::shared_ptr<void>> SensorSync::sync(uint64_t ref_time) {
   std::lock_guard<std::mutex> lock(mutex_);
-  
+
   std::map<std::string, std::shared_ptr<void>> result;
-  
+
   for (auto& [name, buf] : buffers_) {
     result[name] = getNearest_(name, ref_time);
-    
+
     if (result[name]) {
       dropUntil_(name, ref_time);
     }
   }
-  
+
   if (config_.debug) {
-    std::cout << "[SensorSync] Sync completed at " << ref_time 
-              << " us, sources: " << result.size() << std::endl;
+    sync_count_++;
+    if (sync_count_ % 500 == 0) {
+      std::cout << "[SensorSync] Sync completed at " << ref_time 
+                << " us, sources: " << result.size() << std::endl;
+    }
   }
-  
+
   return result;
 }
 
@@ -5663,7 +5738,7 @@ los_guidance_node:
       # Фильтрация ⬇️ УВЕЛИЧЕНО для тяжёлого дрона
       pixel_smooth_alpha: 0.5      # ↑ Было 0.3 (↑67%)
       los_smooth_alpha: 0.2        # ↑ Было 0.1 (↑100%)
-      min_confidence: 0.6          # ↑ Было 0.5 (строже)
+      min_confidence: 0.6          # ↑ Было 0.5 (строже)vj
     
     # === Kalman Filter LOS ===
     kalman:
@@ -5900,5 +5975,5 @@ def generate_launch_description():
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 5743
+Всего строк: 5818
 ================================================================================

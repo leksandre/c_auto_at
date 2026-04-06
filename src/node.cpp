@@ -841,6 +841,16 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
     // === ФАЗА 1: СБЛИЖЕНИЕ ПО GPS ===
     if (auto_phase_ == AutoPhase::GPS_APPROACH)
     {
+      // 🆕 Инициализируем ref_gps_ при первом входе (если ещё не установлен)
+      if (!ref_gps_valid_ && drone_gps_.is_valid)
+      {
+        ref_gps_.lat = drone_gps_.lat;
+        ref_gps_.lon = drone_gps_.lon;
+        ref_gps_.alt = drone_gps_.alt;
+        ref_gps_valid_ = true;
+        RCLCPP_INFO(this->get_logger(), "📍 Reference GPS set: %.6f, %.6f, %.2f", ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+      }
+
       if (ref_gps_valid_)
       {
         // Конвертируем цель в локальные NED-координаты относительно точки взлёта
@@ -867,21 +877,66 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
       if (++poll_counter >= 250)
       {
         poll_counter = 0;
-        // 1. Копируем IP и отпускаем мьютекс перед TCP
-        std::string ip_to_poll = closest_target_ip_;
-        lock.unlock(); // 🔓 Временно освобождаем
 
-        // 2. TCP вызов (не блокирует мьютекс)
-        double t_lat, t_lon, t_alt;
-        int t_sats;
-        if (!ip_to_poll.empty() &&
-            queryTargetGPS(ip_to_poll, target_query_port_, t_lat, t_lon, t_alt, t_sats))
+        // 🆕 Если цели нет (hover mode) — опрашиваем ВСЕ цели в поисках рабочей
+        if (closest_target_ip_.empty() && !commander_targets_.empty())
         {
-          lock.lock(); // 🔒 Захватываем обратно для записи
-          target_gps_ = {t_lat, t_lon, t_alt};
-          RCLCPP_INFO(this->get_logger(), "📡 Target GPS updated: %.6f, %.6f", t_lat, t_lon);
-          lock.unlock(); // 🔓 Сразу отпускаем, чтобы не тормозить публикацию
-          lock.lock();   // 🔒 Возвращаем для продолжения работы функции
+          RCLCPP_INFO(this->get_logger(), "🔍 Scanning all targets for available target...");
+          std::string found_ip;
+          double found_lat = 0, found_lon = 0, found_alt = 0;
+          double my_lat = 0; //, my_lon = 0;
+          {
+            std::lock_guard<std::mutex> gps_lock(state_mutex_);
+            if (drone_gps_.is_valid)
+            {
+              my_lat = drone_gps_.lat;
+              my_lon = drone_gps_.lon;
+            }
+          }
+
+          for (const auto &ip : commander_targets_)
+          {
+            double t_lat, t_lon, t_alt;
+            int t_sats;
+            if (queryTargetGPS(ip, target_query_port_, t_lat, t_lon, t_alt, t_sats))
+            {
+              RCLCPP_INFO(this->get_logger(), "✅ Found available target: %s", ip.c_str());
+              found_ip = ip;
+              found_lat = t_lat;
+              found_lon = t_lon;
+              found_alt = t_alt;
+              break;
+            }
+          }
+
+          lock.lock();
+          if (!found_ip.empty() && std::abs(my_lat) > 1e-3)
+          {
+            target_gps_ = {found_lat, found_lon, found_alt};
+            closest_target_ip_ = found_ip;
+            RCLCPP_INFO(this->get_logger(), "🎯 Target acquired: %s. Starting approach!", found_ip.c_str());
+            // ref_gps будет обновлён при следующем входе в callback
+          }
+          lock.unlock();
+          lock.lock();
+        }
+        else if (!closest_target_ip_.empty())
+        {
+          // 1. Копируем IP и отпускаем мьютекс перед TCP
+          std::string ip_to_poll = closest_target_ip_;
+          lock.unlock(); // 🔓 Временно освобождаем
+
+          // 2. TCP вызов (не блокирует мьютекс)
+          double t_lat, t_lon, t_alt;
+          int t_sats;
+          if (queryTargetGPS(ip_to_poll, target_query_port_, t_lat, t_lon, t_alt, t_sats))
+          {
+            lock.lock(); // 🔒 Захватываем обратно для записи
+            target_gps_ = {t_lat, t_lon, t_alt};
+            RCLCPP_INFO(this->get_logger(), "📡 Target GPS updated: %.6f, %.6f", t_lat, t_lon);
+            lock.unlock(); // 🔓 Сразу отпускаем, чтобы не тормозить публикацию
+            lock.lock();   // 🔒 Возвращаем для продолжения работы функции
+          }
         }
       }
 
@@ -1197,7 +1252,7 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
         start_alt = drone_gps_.alt;
     }
 
-    while (cycles < 200)
+    while (cycles < 1200)
     {
       px4_msgs::msg::TrajectorySetpoint ts;
       ts.position = {NAN, NAN, target_z};
@@ -1284,7 +1339,23 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
     }
     else
     {
-      RCLCPP_ERROR(this->get_logger(), "🛑 No valid targets found.");
+      // 🆕 Цели не найдены — переводим дрон в режим зависания на текущей позиции
+      // и продолжаем периодически опрашивать цели в основном цикле
+      RCLCPP_WARN(this->get_logger(), "🛑 No valid targets found. Entering HOVER mode and will keep polling...");
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      // Устанавливаем цель = текущая позиция дрона (дрон будет зависать на месте)
+      if (drone_gps_.is_valid)
+      {
+        target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};
+      }
+      else
+      {
+        // Если GPS дрона недоступен, используем точку взлёта
+        target_gps_ = {start_lat_, start_lon_, start_alt_ + 5.0};
+      }
+      closest_target_ip_ = ""; // Пока нет цели
+      auto_phase_ = AutoPhase::GPS_APPROACH;
+      attack_ready_ = false;
     }
   }
 

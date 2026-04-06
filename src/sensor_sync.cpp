@@ -20,7 +20,7 @@ namespace los_guidance {
 // ============================================================================
 
 SensorSync::SensorSync(const SyncConfig& config)
-  : config_(config)
+  : config_(config), sync_count_(0)
 {
 }
 
@@ -78,22 +78,25 @@ void SensorSync::addMessage(
 
 std::map<std::string, std::shared_ptr<void>> SensorSync::sync(uint64_t ref_time) {
   std::lock_guard<std::mutex> lock(mutex_);
-  
+
   std::map<std::string, std::shared_ptr<void>> result;
-  
+
   for (auto& [name, buf] : buffers_) {
     result[name] = getNearest_(name, ref_time);
-    
+
     if (result[name]) {
       dropUntil_(name, ref_time);
     }
   }
-  
+
   if (config_.debug) {
-    std::cout << "[SensorSync] Sync completed at " << ref_time 
-              << " us, sources: " << result.size() << std::endl;
+    sync_count_++;
+    if (sync_count_ % 500 == 0) {
+      std::cout << "[SensorSync] Sync completed at " << ref_time 
+                << " us, sources: " << result.size() << std::endl;
+    }
   }
-  
+
   return result;
 }
 
