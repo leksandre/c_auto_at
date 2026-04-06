@@ -385,19 +385,14 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
   {
     RCLCPP_INFO(this->get_logger(), "Creating publishers...");
 
-    // 🆕 QoS для команд управления - RELIABLE для надёжности
-    rclcpp::QoS command_qos(10);
-    command_qos.reliable();
-    command_qos.transient_local();
-
     vehicle_cmd_pub_ = this->create_publisher<px4_msgs::msg::VehicleCommand>(
-        "fmu/in/vehicle_command", command_qos);
+        "fmu/in/vehicle_command", 10);
 
     offboard_ctrl_mode_pub_ = this->create_publisher<px4_msgs::msg::OffboardControlMode>(
-        "fmu/in/offboard_control_mode", command_qos);
+        "fmu/in/offboard_control_mode", 10);
 
     trajectory_setpoint_pub_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>(
-        "fmu/in/trajectory_setpoint", command_qos);
+        "fmu/in/trajectory_setpoint", 10);
 
     los_status_pub_ = this->create_publisher<px4_msgs::msg::VehicleLosStatus>(
         "fmu/in/vehicle_los_status", 10);
