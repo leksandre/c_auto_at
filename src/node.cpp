@@ -385,14 +385,19 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
   {
     RCLCPP_INFO(this->get_logger(), "Creating publishers...");
 
+    // 🆕 QoS для команд управления - RELIABLE для надёжности
+    rclcpp::QoS command_qos(10);
+    command_qos.reliable();
+    command_qos.transient_local();
+
     vehicle_cmd_pub_ = this->create_publisher<px4_msgs::msg::VehicleCommand>(
-        "fmu/in/vehicle_command", 10);
+        "fmu/in/vehicle_command", command_qos);
 
     offboard_ctrl_mode_pub_ = this->create_publisher<px4_msgs::msg::OffboardControlMode>(
-        "fmu/in/offboard_control_mode", 10);
+        "fmu/in/offboard_control_mode", command_qos);
 
     trajectory_setpoint_pub_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>(
-        "fmu/in/trajectory_setpoint", 10);
+        "fmu/in/trajectory_setpoint", command_qos);
 
     los_status_pub_ = this->create_publisher<px4_msgs::msg::VehicleLosStatus>(
         "fmu/in/vehicle_los_status", 10);
@@ -1221,21 +1226,30 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
     if (start_gps_valid_)
       start_alt = start_alt_;
 
-    // 1. Arm
+    // 1. Arm (отправляем многократно для надёжности)
     RCLCPP_INFO(this->get_logger(), "🔑 Sending ARM command...");
-    px4_msgs::msg::VehicleCommand arm_cmd;
-    arm_cmd.command = 400;
-    arm_cmd.param1 = 1.0f;
-    arm_cmd.target_system = 1;
-    arm_cmd.target_component = 1;
-    arm_cmd.from_external = true;
-    arm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-    vehicle_cmd_pub_->publish(arm_cmd);
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    for (int i = 0; i < 10; i++)
+    {
+      px4_msgs::msg::VehicleCommand arm_cmd;
+      arm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+      arm_cmd.param1 = 1.0f;
+      arm_cmd.target_system = 1;
+      arm_cmd.target_component = 1;
+      arm_cmd.from_external = true;
+      arm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+      vehicle_cmd_pub_->publish(arm_cmd);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    // 2. Offboard
+    // 2. Offboard (отправляем многократно для надёжности)
     RCLCPP_INFO(this->get_logger(), "📻 Switching to OFFBOARD...");
-    vehicle_ctrl_->setOffboardMode();
+    for (int i = 0; i < 10; i++)
+    {
+      vehicle_ctrl_->setOffboardMode();
+      vehicle_ctrl_->publishOffboardControlMode();
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // 3. Takeoff to 5m @ 7m/s
