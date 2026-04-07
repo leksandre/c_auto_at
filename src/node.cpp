@@ -760,6 +760,14 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
 
   void Node::vehicleStatusCallback(px4_msgs::msg::VehicleStatus::SharedPtr msg)
   {
+    static bool first_log = true;
+    if (first_log)
+    {
+      RCLCPP_INFO(this->get_logger(), "✅ First vehicle status received! nav_state=%d, arming_state=%d",
+                  msg->nav_state, msg->arming_state);
+      first_log = false;
+    }
+
     vehicle_ctrl_->updateStatus(msg);
 
     // // 🆕 Авто-триггер атаки при переходе в OFFBOARD
@@ -884,7 +892,7 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
           RCLCPP_INFO(this->get_logger(), "🔍 Scanning all targets for available target...");
           std::string found_ip;
           double found_lat = 0, found_lon = 0, found_alt = 0;
-          double my_lat = 0; //, my_lon = 0;
+          double my_lat = 0, my_lon = 0;
           {
             std::lock_guard<std::mutex> gps_lock(state_mutex_);
             if (drone_gps_.is_valid)

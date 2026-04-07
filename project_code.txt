@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-04-06 21:34:33
+Дата: 2026-04-07 18:17:05
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -3274,7 +3274,7 @@ int main(int argc, char **argv) {
 }
 ================================================================================
 Файл: ./src/node.cpp
-Строк: 1373
+Строк: 1390
 ================================================================================
 
 /**
@@ -4039,6 +4039,14 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
 
   void Node::vehicleStatusCallback(px4_msgs::msg::VehicleStatus::SharedPtr msg)
   {
+    static bool first_log = true;
+    if (first_log)
+    {
+      RCLCPP_INFO(this->get_logger(), "✅ First vehicle status received! nav_state=%d, arming_state=%d",
+                  msg->nav_state, msg->arming_state);
+      first_log = false;
+    }
+
     vehicle_ctrl_->updateStatus(msg);
 
     // // 🆕 Авто-триггер атаки при переходе в OFFBOARD
@@ -4163,7 +4171,7 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
           RCLCPP_INFO(this->get_logger(), "🔍 Scanning all targets for available target...");
           std::string found_ip;
           double found_lat = 0, found_lon = 0, found_alt = 0;
-          double my_lat = 0; //, my_lon = 0;
+          double my_lat = 0, my_lon = 0;
           {
             std::lock_guard<std::mutex> gps_lock(state_mutex_);
             if (drone_gps_.is_valid)
@@ -4500,21 +4508,30 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
     if (start_gps_valid_)
       start_alt = start_alt_;
 
-    // 1. Arm
+    // 1. Arm (отправляем многократно для надёжности)
     RCLCPP_INFO(this->get_logger(), "🔑 Sending ARM command...");
-    px4_msgs::msg::VehicleCommand arm_cmd;
-    arm_cmd.command = 400;
-    arm_cmd.param1 = 1.0f;
-    arm_cmd.target_system = 1;
-    arm_cmd.target_component = 1;
-    arm_cmd.from_external = true;
-    arm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-    vehicle_cmd_pub_->publish(arm_cmd);
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    for (int i = 0; i < 10; i++)
+    {
+      px4_msgs::msg::VehicleCommand arm_cmd;
+      arm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+      arm_cmd.param1 = 1.0f;
+      arm_cmd.target_system = 1;
+      arm_cmd.target_component = 1;
+      arm_cmd.from_external = true;
+      arm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+      vehicle_cmd_pub_->publish(arm_cmd);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    // 2. Offboard
+    // 2. Offboard (отправляем многократно для надёжности)
     RCLCPP_INFO(this->get_logger(), "📻 Switching to OFFBOARD...");
-    vehicle_ctrl_->setOffboardMode();
+    for (int i = 0; i < 10; i++)
+    {
+      vehicle_ctrl_->setOffboardMode();
+      vehicle_ctrl_->publishOffboardControlMode();
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // 3. Takeoff to 5m @ 7m/s
@@ -5975,5 +5992,5 @@ def generate_launch_description():
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 5818
+Всего строк: 5835
 ================================================================================
