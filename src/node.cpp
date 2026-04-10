@@ -227,9 +227,8 @@ namespace los_guidance
 
     RCLCPP_INFO(this->get_logger(), "Parameters loaded successfully");
     commander_enabled_ = this->get_parameter("commander.enable").as_bool();
-RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d", 
-            commander_enabled_ ? "TRUE" : "FALSE", commander_port_);
-            
+    RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
+                commander_enabled_ ? "TRUE" : "FALSE", commander_port_);
   }
 
   void Node::initializeControllers()
@@ -387,11 +386,11 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
             }
             else
             {
-              RCLCPP_INFO(this->get_logger(), "🔓 DISARM command received");
+              RCLCPP_INFO(this->get_logger(), "🔓 0DISARM command received");
               // 🆕 Если взлёт активен — прерываем
               if (takeoff_running_)
               {
-                RCLCPP_WARN(this->get_logger(), "⚠️ Aborting takeoff due to DISARM");
+                RCLCPP_WARN(this->get_logger(), "⚠️ 0Aborting takeoff due to DISARM");
                 takeoff_abort_ = true;
               }
               px4_msgs::msg::VehicleCommand cmd;
@@ -878,7 +877,7 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
 
   void Node::controlLoopTimerCallback()
   {
-    std::unique_lock<std::mutex> lock(state_mutex_);// блять блочит весь цикл...
+    std::unique_lock<std::mutex> lock(state_mutex_); // блять блочит весь цикл...
 
     // === ФАЗА 1: СБЛИЖЕНИЕ ПО GPS ===
     if (auto_phase_ == AutoPhase::GPS_APPROACH)
@@ -1295,13 +1294,12 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
     this->declare_parameter("takeoff.altitude_threshold_m", 1.5);
     this->declare_parameter("takeoff.min_altitude_already_flying_m", 2.0);
     this->declare_parameter("takeoff.min_cycles_for_already_flying", 20);
-    this->declare_parameter("takeoff.skip", false);  // 🆕 Пропуск этапа взлёта
+    this->declare_parameter("takeoff.skip", false); // 🆕 Пропуск этапа взлёта
 
     bool skip_takeoff = this->get_parameter("takeoff.skip").as_bool();
 
-    RCLCPP_INFO(this->get_logger(), "🔧 !!!!!!!!!!!!! skip_takeoff = : %s ", 
-            skip_takeoff ? "TRUE" : "FALSE");
-
+    RCLCPP_INFO(this->get_logger(), "🔧 !!!!!!!!!!!!! skip_takeoff = : %s ",
+                skip_takeoff ? "TRUE" : "FALSE");
 
     if (skip_takeoff)
     {
@@ -1316,7 +1314,7 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
           ref_gps_.lon = drone_gps_.lon;
           ref_gps_.alt = drone_gps_.alt;
           ref_gps_valid_ = true;
-          target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};  // hover на месте
+          target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt}; // hover на месте
           RCLCPP_INFO(this->get_logger(), "📍 Hover GPS: %.6f, %.6f, %.2f",
                       drone_gps_.lat, drone_gps_.lon, drone_gps_.alt);
         }
@@ -1350,157 +1348,226 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
     else
     {
 
-    float target_z = -static_cast<float>(this->get_parameter("takeoff.target_altitude_m").as_double());
-    float vz = static_cast<float>(this->get_parameter("takeoff.climb_rate_mps").as_double());
-    float altitude_threshold = static_cast<float>(this->get_parameter("takeoff.altitude_threshold_m").as_double());
-    float min_alt_already_flying = static_cast<float>(this->get_parameter("takeoff.min_altitude_already_flying_m").as_double());
-    int min_cycles_already_flying = static_cast<int>(this->get_parameter("takeoff.min_cycles_for_already_flying").as_int());
+      float target_z = -static_cast<float>(this->get_parameter("takeoff.target_altitude_m").as_double());
+      float vz = static_cast<float>(this->get_parameter("takeoff.climb_rate_mps").as_double());
+      float altitude_threshold = static_cast<float>(this->get_parameter("takeoff.altitude_threshold_m").as_double());
+      float min_alt_already_flying = static_cast<float>(this->get_parameter("takeoff.min_altitude_already_flying_m").as_double());
+      int min_cycles_already_flying = static_cast<int>(this->get_parameter("takeoff.min_cycles_for_already_flying").as_int());
 
-    RCLCPP_INFO(this->get_logger(), "🛫 Takeoff: target=%.1fm, climb=%.1fm/s, threshold=%.1fm",
-                -target_z, vz, altitude_threshold);
+      RCLCPP_INFO(this->get_logger(), "🛫 Takeoff: target=%.1fm, climb=%.1fm/s, threshold=%.1fm",
+                  -target_z, vz, altitude_threshold);
 
-    // 🆕 Флаги для прерывания взлёта командами
-    takeoff_running_ = true;
-    takeoff_abort_ = false;
+      // 🆕 Флаги для прерывания взлёта командами
+      takeoff_running_ = true;
+      takeoff_abort_ = false;
 
-    int cycles = 0;
+      int cycles = 0;
 
-    {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      if (drone_gps_.is_valid)
-        start_alt = drone_gps_.alt;
-    }
-
-    while (cycles < 1200) //1200
-    {
-      // 🆕 Проверка флага прерывания (команда извне)
-      if (takeoff_abort_)
       {
-        RCLCPP_INFO(this->get_logger(), "🛑 Takeoff aborted by command");
-        takeoff_running_ = false;
-
-        // 🆕 Переводим дрон в режим зависания на текущей позиции
-        // и немедленно публикуем setpoint чтобы PX4 перестал набирать высоту
-        double cur_lat = 0, cur_lon = 0, cur_alt = 0;
-        bool gps_valid = false;
-        {
-          std::lock_guard<std::mutex> lock(state_mutex_);
-          RCLCPP_INFO(this->get_logger(), "🔍 Abort check: drone_gps_.is_valid=%d, start_alt=%.2f",
-                      drone_gps_.is_valid ? 1 : 0, start_alt);
-          if (drone_gps_.is_valid && !std::isnan(start_alt))
-          {
-            target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};
-            cur_lat = drone_gps_.lat;
-            cur_lon = drone_gps_.lon;
-            cur_alt = drone_gps_.alt;
-            gps_valid = true;
-
-            // 🆕 Устанавливаем ref_gps_ чтобы controlLoopTimerCallback мог публиковать setpoint
-            ref_gps_.lat = drone_gps_.lat;
-            ref_gps_.lon = drone_gps_.lon;
-            ref_gps_.alt = drone_gps_.alt;
-            ref_gps_valid_ = true;
-          }
-          auto_phase_ = AutoPhase::GPS_APPROACH;
-          start_attack_ = false;
-          attack_enabled_ = false;
-          attack_ready_ = false;
-        }
-
-        if (gps_valid && !std::isnan(start_alt))
-        {
-          double current_ned_z = -(cur_alt - start_alt);
-          RCLCPP_INFO(this->get_logger(), "🛑 Publishing hover setpoint at z=%.2f (NED), GPS: %.6f, %.6f, %.2f",
-                      current_ned_z, cur_lat, cur_lon, cur_alt);
-
-          // 🆕 Отправляем setpoint многократно чтобы PX4 точно принял
-          for (int i = 0; i < 10; i++)
-          {
-            px4_msgs::msg::TrajectorySetpoint hover_ts;
-            hover_ts.position = {NAN, NAN, static_cast<float>(current_ned_z)};
-            hover_ts.velocity = {NAN, NAN, 0.0f};
-            hover_ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-            trajectory_setpoint_pub_->publish(hover_ts);
-            vehicle_ctrl_->publishOffboardControlMode();
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-          }
-        }
-        else
-        {
-          RCLCPP_WARN(this->get_logger(), "⚠️ GPS invalid during abort (gps_valid=%d, start_alt=%.2f), publishing NAN hover",
-                      gps_valid ? 1 : 0, start_alt);
-          // 🆕 Отправляем NAN setpoint многократно
-          for (int i = 0; i < 10; i++)
-          {
-            px4_msgs::msg::TrajectorySetpoint hover_ts;
-            hover_ts.position = {NAN, NAN, NAN};
-            hover_ts.velocity = {NAN, NAN, NAN};
-            hover_ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-            trajectory_setpoint_pub_->publish(hover_ts);
-            vehicle_ctrl_->publishOffboardControlMode();
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-          }
-        }
-        return;
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (drone_gps_.is_valid)
+          start_alt = drone_gps_.alt;
       }
 
-      px4_msgs::msg::TrajectorySetpoint ts;
-      ts.position = {NAN, NAN, target_z};
-      ts.velocity = {NAN, NAN, vz};
-      ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-      trajectory_setpoint_pub_->publish(ts);
-      vehicle_ctrl_->publishOffboardControlMode();
+      while (cycles < 1200) // 1200
+      {
+        // 🆕 Лог статуса на каждой 500-й итерации
+        if (cycles > 0 && cycles % 500 == 0)
+        {
+          RCLCPP_INFO(this->get_logger(), "🔄 -------- Takeoff cycle %d: takeoff_abort_=%s, takeoff_running_=%s",
+                      cycles,
+                      takeoff_abort_ ? "true" : "false",
+                      takeoff_running_ ? "true" : "false");
+        }
 
+        if (takeoff_abort_)
+        {
+
+            RCLCPP_INFO(this->get_logger(), "2🛑 Takeoff aborted by command");
+
+          std::this_thread::sleep_for(std::chrono::seconds(4));
+
+          RCLCPP_INFO(this->get_logger(), "📻 --!!!!!!!!!!-----Switching to manual...");
+          for (int i = 0; i < 10; i++)
+          {
+            vehicle_ctrl_->setManualMode();
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          }
+          std::this_thread::sleep_for(std::chrono::seconds(1));
+
+          // 🆕 Отправляем команду DISARM в PX4 перед выходом из цикла взлёта
+          RCLCPP_INFO(this->get_logger(), "🔓 -------Sending DISARM command...");
+          for (int i = 0; i < 100; i++)
+          {
+            px4_msgs::msg::VehicleCommand disarm_cmd;
+            disarm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+            disarm_cmd.param1 = 0.0f; // 0 = disarm
+            disarm_cmd.target_system = 1;
+            disarm_cmd.target_component = 1;
+            disarm_cmd.from_external = true;
+            disarm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+            vehicle_cmd_pub_->publish(disarm_cmd);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          }
+
+          return;
+        }
+
+        // 🆕 Проверка флага прерывания (команда извне)
+        if (takeoff_abort_)
+        {
+          return;
+          RCLCPP_INFO(this->get_logger(), "1!!!!!!!!!!!!!!----------🛑 Takeoff aborted by command");
+          takeoff_running_ = false;
+
+          // 🆕 Переводим дрон в режим зависания на текущей позиции
+          // и немедленно публикуем setpoint чтобы PX4 перестал набирать высоту
+          double cur_lat = 0, cur_lon = 0, cur_alt = 0;
+          bool gps_valid = false;
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            RCLCPP_INFO(this->get_logger(), "🔍 Abort check: drone_gps_.is_valid=%d, start_alt=%.2f",
+                        drone_gps_.is_valid ? 1 : 0, start_alt);
+            if (drone_gps_.is_valid && !std::isnan(start_alt))
+            {
+              target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};
+              cur_lat = drone_gps_.lat;
+              cur_lon = drone_gps_.lon;
+              cur_alt = drone_gps_.alt;
+              gps_valid = true;
+
+              // 🆕 Устанавливаем ref_gps_ чтобы controlLoopTimerCallback мог публиковать setpoint
+              ref_gps_.lat = drone_gps_.lat;
+              ref_gps_.lon = drone_gps_.lon;
+              ref_gps_.alt = drone_gps_.alt;
+              ref_gps_valid_ = true;
+            }
+            auto_phase_ = AutoPhase::GPS_APPROACH;
+            start_attack_ = false;
+            attack_enabled_ = false;
+            attack_ready_ = false;
+          }
+
+          if (gps_valid && !std::isnan(start_alt))
+          {
+            double current_ned_z = -(cur_alt - start_alt);
+            RCLCPP_INFO(this->get_logger(), "🛑 Publishing hover setpoint at z=%.2f (NED), GPS: %.6f, %.6f, %.2f",
+                        current_ned_z, cur_lat, cur_lon, cur_alt);
+
+            // 🆕 Отправляем setpoint многократно чтобы PX4 точно принял
+            for (int i = 0; i < 10; i++)
+            {
+              px4_msgs::msg::TrajectorySetpoint hover_ts;
+              hover_ts.position = {NAN, NAN, static_cast<float>(current_ned_z)};
+              hover_ts.velocity = {NAN, NAN, 0.0f};
+              hover_ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+              trajectory_setpoint_pub_->publish(hover_ts);
+              vehicle_ctrl_->publishOffboardControlMode();
+              std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+          }
+          else
+          {
+            RCLCPP_WARN(this->get_logger(), "⚠️ GPS invalid during abort (gps_valid=%d, start_alt=%.2f), publishing NAN hover",
+                        gps_valid ? 1 : 0, start_alt);
+            // 🆕 Отправляем NAN setpoint многократно
+            for (int i = 0; i < 10; i++)
+            {
+              px4_msgs::msg::TrajectorySetpoint hover_ts;
+              hover_ts.position = {NAN, NAN, NAN};
+              hover_ts.velocity = {NAN, NAN, NAN};
+              hover_ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+              trajectory_setpoint_pub_->publish(hover_ts);
+              vehicle_ctrl_->publishOffboardControlMode();
+              std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+          }
+          return;
+        }
+
+        px4_msgs::msg::TrajectorySetpoint ts;
+        ts.position = {NAN, NAN, target_z};
+        ts.velocity = {NAN, NAN, vz};
+        ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        trajectory_setpoint_pub_->publish(ts);
+        vehicle_ctrl_->publishOffboardControlMode();
+
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          if (drone_gps_.is_valid && !std::isnan(start_alt))
+          {
+            // 🛠 FIX: При взлёте высота (MSL) увеличивается. Меняем <= на >=
+            if (drone_gps_.alt >= start_alt + altitude_threshold)
+            {
+              RCLCPP_INFO(this->get_logger(), "✅ Altitude reached.");
+              break;
+            }
+            if (drone_gps_.alt >= start_alt + min_alt_already_flying && cycles > min_cycles_already_flying)
+            {
+              RCLCPP_INFO(this->get_logger(), "✅ Already flying.");
+              break;
+            }
+          }
+        }
+
+        // 🆕 Короткий сон с проверкой прерывания (вместо одного длинного sleep)
+        for (int i = 0; i < 20; i++) // 20 * 1ms = 20ms
+        {
+          if (takeoff_abort_)
+          {
+            RCLCPP_INFO(this->get_logger(), "3🛑 Takeoff aborted by command");
+            takeoff_running_ = false;
+            std::this_thread::sleep_for(std::chrono::seconds(4));
+            RCLCPP_INFO(this->get_logger(), "📻 --!!!!!!!!!!-----Switching to manual...");
+            for (int i = 0; i < 100; i++)
+            {
+              vehicle_ctrl_->setManualMode();
+              
+              std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+
+            // 🆕 Отправляем команду DISARM в PX4 перед выходом из цикла взлёта
+            RCLCPP_INFO(this->get_logger(), "🔓 -------Sending DISARM command...");
+            for (int i = 0; i < 100; i++)
+            {
+              px4_msgs::msg::VehicleCommand disarm_cmd;
+              disarm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+              disarm_cmd.param1 = 0.0f; // 0 = disarm
+              disarm_cmd.target_system = 1;
+              disarm_cmd.target_component = 1;
+              disarm_cmd.from_external = true;
+              disarm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+              vehicle_cmd_pub_->publish(disarm_cmd);
+              std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+
+            return;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        cycles++;
+      }
+
+      takeoff_running_ = false;
+
+      // 🆕 Если высота не достигнута — всё равно продолжаем к poll targets
+      // и переходим в режим детекции/удержания цели
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (drone_gps_.is_valid && !std::isnan(start_alt))
         {
-          // 🛠 FIX: При взлёте высота (MSL) увеличивается. Меняем <= на >=
-          if (drone_gps_.alt >= start_alt + altitude_threshold)
+          double current_alt = drone_gps_.alt;
+          if (current_alt < start_alt + altitude_threshold)
           {
-            RCLCPP_INFO(this->get_logger(), "✅ Altitude reached.");
-            break;
-          }
-          if (drone_gps_.alt >= start_alt + min_alt_already_flying && cycles > min_cycles_already_flying)
-          {
-            RCLCPP_INFO(this->get_logger(), "✅ Already flying.");
-            break;
+            RCLCPP_WARN(this->get_logger(),
+                        "⚠️ Target altitude not reached (alt=%.1f, target=%.1f). Proceeding to detection mode anyway.",
+                        current_alt, -target_z);
           }
         }
       }
-
-      // 🆕 Короткий сон с проверкой прерывания (вместо одного длинного sleep)
-      for (int i = 0; i < 20; i++) // 20 * 1ms = 20ms
-      {
-        if (takeoff_abort_)
-        {
-          RCLCPP_INFO(this->get_logger(), "🛑 Takeoff aborted by command");
-          takeoff_running_ = false;
-          return;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-      cycles++;
-    }
-
-    takeoff_running_ = false;
-
-    // 🆕 Если высота не достигнута — всё равно продолжаем к poll targets
-    // и переходим в режим детекции/удержания цели
-    {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      if (drone_gps_.is_valid && !std::isnan(start_alt))
-      {
-        double current_alt = drone_gps_.alt;
-        if (current_alt < start_alt + altitude_threshold)
-        {
-          RCLCPP_WARN(this->get_logger(),
-              "⚠️ Target altitude not reached (alt=%.1f, target=%.1f). Proceeding to detection mode anyway.",
-              current_alt, -target_z);
-        }
-      }
-    }
-    }  // end of else (skip_takeoff == false)
+    } // end of else (skip_takeoff == false)
 
     // 🆕 Если ref_gps_ не установлен (skip_takeoff=true), но GPS валиден — устанавливаем
     {
@@ -1558,6 +1625,157 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
       else
       {
         RCLCPP_WARN(this->get_logger(), "❌ Timeout/invalid response from %s", ip.c_str());
+      }
+    }
+
+    // 🆕 Визуальный поиск цели после взлёта (висим на месте, ждём обнаружения камерой)
+    this->declare_parameter("takeoff.visual_searching", false);
+    this->declare_parameter("takeoff.visual_search_timeout_s", 300); // 5 минут по умолчанию
+    bool visual_searching = this->get_parameter("takeoff.visual_searching").as_bool();
+    int visual_search_timeout_s = this->get_parameter("takeoff.visual_search_timeout_s").as_int();
+
+    if (visual_searching)
+    {
+      RCLCPP_INFO(this->get_logger(), "🔍 Visual search mode: hovering for %d seconds waiting for target detection...",
+                  visual_search_timeout_s);
+
+      // Устанавливаем hover на текущей позиции
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (drone_gps_.is_valid)
+        {
+          target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};
+        }
+        auto_phase_ = AutoPhase::GPS_APPROACH;
+        start_attack_ = false;
+        attack_enabled_ = false;
+        attack_ready_ = false;
+      }
+
+      auto search_start = std::chrono::steady_clock::now();
+      bool target_found = false;
+
+      while (true)
+      {
+
+        if (takeoff_abort_)
+        {
+          RCLCPP_INFO(this->get_logger(), "4!!!!!!!!!!!!!!----------🛑 Takeoff aborted by command");
+          takeoff_running_ = false;
+
+          std::this_thread::sleep_for(std::chrono::seconds(4));
+          RCLCPP_INFO(this->get_logger(), "📻 --!!!!!!!!!!-----Switching to manual...");
+          for (int i = 0; i < 100; i++)
+          {
+            vehicle_ctrl_->setManualMode();
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          }
+          std::this_thread::sleep_for(std::chrono::seconds(1));
+
+          // 🆕 Отправляем команду DISARM в PX4 перед выходом из цикла взлёта
+          RCLCPP_INFO(this->get_logger(), "🔓 -------Sending DISARM command...");
+          for (int i = 0; i < 100; i++)
+          {
+            px4_msgs::msg::VehicleCommand disarm_cmd;
+            disarm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+            disarm_cmd.param1 = 0.0f; // 0 = disarm
+            disarm_cmd.target_system = 1;
+            disarm_cmd.target_component = 1;
+            disarm_cmd.from_external = true;
+            disarm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+            vehicle_cmd_pub_->publish(disarm_cmd);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          }
+
+          return;
+        }
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                           std::chrono::steady_clock::now() - search_start)
+                           .count();
+
+        if (elapsed >= visual_search_timeout_s)
+        {
+          RCLCPP_WARN(this->get_logger(), "⏰ Visual search timeout (%ds) — no target detected",
+                      visual_search_timeout_s);
+          break;
+        }
+
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          if (attack_ready_)
+          {
+            RCLCPP_INFO(this->get_logger(), "🎯 Target detected by camera after %ld seconds!",
+                        elapsed);
+            target_found = true;
+            break;
+          }
+        }
+
+        // Публикуем hover setpoint
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          if (drone_gps_.is_valid && ref_gps_valid_)
+          {
+            Eigen::Vector3d hover_ned = gpsToNed(
+                drone_gps_.lat, drone_gps_.lon, drone_gps_.alt,
+                ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+            vehicle_ctrl_->publishPositionSetpoint(hover_ned);
+          }
+        }
+        vehicle_ctrl_->publishOffboardControlMode();
+
+        // Короткий сон с проверкой abort
+        for (int i = 0; i < 20; i++)
+        {
+          if (takeoff_abort_)
+          {
+            RCLCPP_INFO(this->get_logger(), "🛑 5Visual search aborted by command");
+            takeoff_running_ = false;
+            std::this_thread::sleep_for(std::chrono::seconds(4));
+
+            RCLCPP_INFO(this->get_logger(), "📻 --!!!!!!!!!!-----Switching to manual...");
+            for (int i = 0; i < 100; i++)
+            {
+              vehicle_ctrl_->setManualMode();
+              
+              std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+
+            // 🆕 Отправляем команду DISARM в PX4 перед выходом из цикла взлёта
+            RCLCPP_INFO(this->get_logger(), "🔓 -------Sending DISARM command...");
+            for (int i = 0; i < 100; i++)
+            {
+              px4_msgs::msg::VehicleCommand disarm_cmd;
+              disarm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+              disarm_cmd.param1 = 0.0f; // 0 = disarm
+              disarm_cmd.target_system = 1;
+              disarm_cmd.target_component = 1;
+              disarm_cmd.from_external = true;
+              disarm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+              vehicle_cmd_pub_->publish(disarm_cmd);
+              std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+      }
+
+      if (target_found)
+      {
+        // Цель найдена камерой — переходим в атаку
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        auto_phase_ = AutoPhase::VISUAL_ATTACK;
+        start_attack_ = true;
+        attack_enabled_ = true;
+        RCLCPP_INFO(this->get_logger(), "🚀 Switching to VISUAL ATTACK mode!");
+        return;
+      }
+      else
+      {
+        // Таймаут — переходим к GPS сближению если цель есть
+        RCLCPP_INFO(this->get_logger(), "🔄 Proceeding to GPS approach phase...");
       }
     }
 

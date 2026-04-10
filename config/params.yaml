@@ -1,5 +1,14 @@
 los_guidance_node:
   ros__parameters:
+    takeoff:
+      climb_rate_mps: -0.3  # 10 м/с
+      target_altitude_m: 1.0 
+      altitude_threshold_m: 1.5 
+      min_altitude_already_flying_m: 2.0 
+      min_cycles_for_already_flying: 20 
+      skip: false                    # Пропуск взлёта
+      visual_searching: true         # 🔍 Визуальный поиск после взлёта
+      visual_search_timeout_s: 300   # ⏰ 5 минут ожидания
     # === Tracker ===
     camera:
       # Камера
