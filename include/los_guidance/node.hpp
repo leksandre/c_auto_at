@@ -385,6 +385,9 @@ namespace los_guidance
     bool commander_enabled_{false};
     int commander_port_{11472};
 
+    std::atomic<bool> takeoff_running_{false};   // 🆕 Флаг: взлёт активен
+    std::atomic<bool> takeoff_abort_{false};      // 🆕 Флаг: прервать взлёт
+
     rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr gps_pos_sub_;
     void vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
 

@@ -20,7 +20,7 @@ namespace los_guidance {
 // ============================================================================
 
 SensorSync::SensorSync(const SyncConfig& config)
-  : config_(config), sync_count_(0)
+  : config_(config), sync_count_(0), add_count_(0)
 {
 }
 
@@ -70,9 +70,12 @@ void SensorSync::addMessage(
   }
   
   if (config_.debug) {
-    std::cout << "[SensorSync] Added message to '" << source 
-              << "' at " << ts_us << " us, buffer size: " 
-              << buf.size() << std::endl;
+    add_count_++;
+    if (add_count_ % 500 == 0) {
+      std::cout << "[SensorSync] Added message to '" << source
+                << "' at " << ts_us << " us, buffer size: "
+                << buf.size() << std::endl;
+    }
   }
 }
 

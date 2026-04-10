@@ -11,10 +11,12 @@ namespace los_guidance
 {
 
   Commander::Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
-                       GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger)
+                       GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger,
+                       ArmCallback arm_cb)
       : port_(port), attack_callback_(std::move(attack_cb)),
         auto_mode_callback_(std::move(auto_cb)), gps_query_callback_(std::move(gps_cb)),
-        home_callback_(std::move(home_cb)), logger_(std::move(logger)) {}
+        home_callback_(std::move(home_cb)), arm_callback_(std::move(arm_cb)),
+        logger_(std::move(logger)) {}
 
   Commander::~Commander() { stop(); }
 
@@ -170,6 +172,63 @@ namespace los_guidance
       if (auto_mode_callback_)
         auto_mode_callback_();
       sendResponse(client_fd, "{\"status\":\"success\",\"command\":\"SET_MODE\",\"mode\":\"auto\"}\n");
+      return;
+    }
+
+    // 🆕 2.1 Обработка arm/disarm
+    if (data.find("\"arm\"") != std::string::npos)
+    {
+      bool arm = false;
+      // Парсим: "arm": true или "arm": false
+      size_t key_pos = data.find("\"arm\"");
+      size_t colon_pos = data.find(':', key_pos);
+      if (colon_pos != std::string::npos)
+      {
+        std::string val = data.substr(colon_pos + 1);
+        val.erase(0, val.find_first_not_of(" \t\r\n"));
+        if (val.substr(0, 4) == "true" || val.substr(0, 1) == "1")
+          arm = true;
+        else if (val.substr(0, 5) == "false" || val.substr(0, 1) == "0")
+          arm = false;
+        else {
+          sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"ARM\",\"message\":\"Invalid value, use true/false\"}\n");
+          return;
+        }
+      }
+      else
+      {
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"ARM\",\"message\":\"Invalid format\"}\n");
+        return;
+      }
+
+      RCLCPP_INFO(logger_, "🔑 Received command: %s", arm ? "ARM" : "DISARM");
+      if (arm_callback_)
+        arm_callback_(arm);
+
+      if (arm)
+        sendResponse(client_fd, "{\"status\":\"success\",\"command\":\"ARM\"}\n");
+      else
+        sendResponse(client_fd, "{\"status\":\"success\",\"command\":\"DISARM\"}\n");
+      return;
+    }
+
+    // 🆕 Отдельная команда disarm (для совместимости с "disarm": true)
+    if (data.find("\"disarm\"") != std::string::npos)
+    {
+      RCLCPP_INFO(logger_, "🔓 Received command: disarm");
+      if (arm_callback_)
+        arm_callback_(false);  // disarm = false
+      sendResponse(client_fd, "{\"status\":\"success\",\"command\":\"DISARM\"}\n");
+      return;
+    }
+
+    // 🆕 Команда прерывания взлёта
+    if (data.find("\"abort_takeoff\"") != std::string::npos)
+    {
+      RCLCPP_INFO(logger_, "🛑 Received command: abort_takeoff");
+      if (arm_callback_)
+        arm_callback_(false);  // disarm = прерывание взлёта
+      sendResponse(client_fd, "{\"status\":\"success\",\"command\":\"ABORT_TAKEOFF\"}\n");
       return;
     }
 

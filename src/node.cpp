@@ -369,7 +369,41 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
             }
             return hd;
           },
-          this->get_logger());
+          this->get_logger(),
+          // 🆕 Колбэк для команд ARM/DISARM (с прерыванием взлёта)
+          [this](bool arm)
+          {
+            if (arm)
+            {
+              RCLCPP_INFO(this->get_logger(), "🔑 ARM command received");
+              px4_msgs::msg::VehicleCommand cmd;
+              cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+              cmd.param1 = 1.0f;
+              cmd.target_system = 1;
+              cmd.target_component = 1;
+              cmd.from_external = true;
+              cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+              vehicle_cmd_pub_->publish(cmd);
+            }
+            else
+            {
+              RCLCPP_INFO(this->get_logger(), "🔓 DISARM command received");
+              // 🆕 Если взлёт активен — прерываем
+              if (takeoff_running_)
+              {
+                RCLCPP_WARN(this->get_logger(), "⚠️ Aborting takeoff due to DISARM");
+                takeoff_abort_ = true;
+              }
+              px4_msgs::msg::VehicleCommand cmd;
+              cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+              cmd.param1 = 0.0f;
+              cmd.target_system = 1;
+              cmd.target_component = 1;
+              cmd.from_external = true;
+              cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+              vehicle_cmd_pub_->publish(cmd);
+            }
+          });
       commander_->start();
     }
 
@@ -1255,11 +1289,79 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
     }
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    // 3. Takeoff to 5m @ 7m/s
-    RCLCPP_INFO(this->get_logger(), "🛫 Taking off to 5m altitude...");
-    // 🛠 FIX: Используем float, чтобы убрать warning narrowing conversion
-    float target_z = -5.0f;
-    float vz = -7.0f;
+    // 3. Takeoff — читаем параметры из YAML
+    this->declare_parameter("takeoff.target_altitude_m", 1.0);
+    this->declare_parameter("takeoff.climb_rate_mps", -3.0);
+    this->declare_parameter("takeoff.altitude_threshold_m", 1.5);
+    this->declare_parameter("takeoff.min_altitude_already_flying_m", 2.0);
+    this->declare_parameter("takeoff.min_cycles_for_already_flying", 20);
+    this->declare_parameter("takeoff.skip", false);  // 🆕 Пропуск этапа взлёта
+
+    bool skip_takeoff = this->get_parameter("takeoff.skip").as_bool();
+
+    RCLCPP_INFO(this->get_logger(), "🔧 !!!!!!!!!!!!! skip_takeoff = : %s ", 
+            skip_takeoff ? "TRUE" : "FALSE");
+
+
+    if (skip_takeoff)
+    {
+      RCLCPP_INFO(this->get_logger(), "⏩ Skipping takeoff phase, going straight to target search");
+
+      // 🆕 Устанавливаем ref_gps_ на текущую позицию
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (drone_gps_.is_valid)
+        {
+          ref_gps_.lat = drone_gps_.lat;
+          ref_gps_.lon = drone_gps_.lon;
+          ref_gps_.alt = drone_gps_.alt;
+          ref_gps_valid_ = true;
+          target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};  // hover на месте
+          RCLCPP_INFO(this->get_logger(), "📍 Hover GPS: %.6f, %.6f, %.2f",
+                      drone_gps_.lat, drone_gps_.lon, drone_gps_.alt);
+        }
+        else
+        {
+          RCLCPP_WARN(this->get_logger(), "⚠️ GPS invalid at takeoff skip, using NAN for hover");
+          ref_gps_valid_ = false;
+          target_gps_ = {0, 0, 0};
+        }
+        auto_phase_ = AutoPhase::GPS_APPROACH;
+        start_attack_ = false;
+        attack_enabled_ = false;
+        attack_ready_ = false;
+      }
+
+      // 🆕 Публикуем hover setpoint многократно
+      for (int i = 0; i < 10; i++)
+      {
+        px4_msgs::msg::TrajectorySetpoint hover_ts;
+        hover_ts.position = {NAN, NAN, NAN};
+        hover_ts.velocity = {NAN, NAN, NAN};
+        hover_ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        trajectory_setpoint_pub_->publish(hover_ts);
+        vehicle_ctrl_->publishOffboardControlMode();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+
+      // 🆕 Переходим к опросу целей (poll targets) — как после взлёта
+      // Проваливаемся в код ниже
+    }
+    else
+    {
+
+    float target_z = -static_cast<float>(this->get_parameter("takeoff.target_altitude_m").as_double());
+    float vz = static_cast<float>(this->get_parameter("takeoff.climb_rate_mps").as_double());
+    float altitude_threshold = static_cast<float>(this->get_parameter("takeoff.altitude_threshold_m").as_double());
+    float min_alt_already_flying = static_cast<float>(this->get_parameter("takeoff.min_altitude_already_flying_m").as_double());
+    int min_cycles_already_flying = static_cast<int>(this->get_parameter("takeoff.min_cycles_for_already_flying").as_int());
+
+    RCLCPP_INFO(this->get_logger(), "🛫 Takeoff: target=%.1fm, climb=%.1fm/s, threshold=%.1fm",
+                -target_z, vz, altitude_threshold);
+
+    // 🆕 Флаги для прерывания взлёта командами
+    takeoff_running_ = true;
+    takeoff_abort_ = false;
 
     int cycles = 0;
 
@@ -1269,8 +1371,79 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
         start_alt = drone_gps_.alt;
     }
 
-    while (cycles < 1200)
+    while (cycles < 1200) //1200
     {
+      // 🆕 Проверка флага прерывания (команда извне)
+      if (takeoff_abort_)
+      {
+        RCLCPP_INFO(this->get_logger(), "🛑 Takeoff aborted by command");
+        takeoff_running_ = false;
+
+        // 🆕 Переводим дрон в режим зависания на текущей позиции
+        // и немедленно публикуем setpoint чтобы PX4 перестал набирать высоту
+        double cur_lat = 0, cur_lon = 0, cur_alt = 0;
+        bool gps_valid = false;
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          RCLCPP_INFO(this->get_logger(), "🔍 Abort check: drone_gps_.is_valid=%d, start_alt=%.2f",
+                      drone_gps_.is_valid ? 1 : 0, start_alt);
+          if (drone_gps_.is_valid && !std::isnan(start_alt))
+          {
+            target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};
+            cur_lat = drone_gps_.lat;
+            cur_lon = drone_gps_.lon;
+            cur_alt = drone_gps_.alt;
+            gps_valid = true;
+
+            // 🆕 Устанавливаем ref_gps_ чтобы controlLoopTimerCallback мог публиковать setpoint
+            ref_gps_.lat = drone_gps_.lat;
+            ref_gps_.lon = drone_gps_.lon;
+            ref_gps_.alt = drone_gps_.alt;
+            ref_gps_valid_ = true;
+          }
+          auto_phase_ = AutoPhase::GPS_APPROACH;
+          start_attack_ = false;
+          attack_enabled_ = false;
+          attack_ready_ = false;
+        }
+
+        if (gps_valid && !std::isnan(start_alt))
+        {
+          double current_ned_z = -(cur_alt - start_alt);
+          RCLCPP_INFO(this->get_logger(), "🛑 Publishing hover setpoint at z=%.2f (NED), GPS: %.6f, %.6f, %.2f",
+                      current_ned_z, cur_lat, cur_lon, cur_alt);
+
+          // 🆕 Отправляем setpoint многократно чтобы PX4 точно принял
+          for (int i = 0; i < 10; i++)
+          {
+            px4_msgs::msg::TrajectorySetpoint hover_ts;
+            hover_ts.position = {NAN, NAN, static_cast<float>(current_ned_z)};
+            hover_ts.velocity = {NAN, NAN, 0.0f};
+            hover_ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+            trajectory_setpoint_pub_->publish(hover_ts);
+            vehicle_ctrl_->publishOffboardControlMode();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          }
+        }
+        else
+        {
+          RCLCPP_WARN(this->get_logger(), "⚠️ GPS invalid during abort (gps_valid=%d, start_alt=%.2f), publishing NAN hover",
+                      gps_valid ? 1 : 0, start_alt);
+          // 🆕 Отправляем NAN setpoint многократно
+          for (int i = 0; i < 10; i++)
+          {
+            px4_msgs::msg::TrajectorySetpoint hover_ts;
+            hover_ts.position = {NAN, NAN, NAN};
+            hover_ts.velocity = {NAN, NAN, NAN};
+            hover_ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+            trajectory_setpoint_pub_->publish(hover_ts);
+            vehicle_ctrl_->publishOffboardControlMode();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          }
+        }
+        return;
+      }
+
       px4_msgs::msg::TrajectorySetpoint ts;
       ts.position = {NAN, NAN, target_z};
       ts.velocity = {NAN, NAN, vz};
@@ -1283,20 +1456,64 @@ RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
         if (drone_gps_.is_valid && !std::isnan(start_alt))
         {
           // 🛠 FIX: При взлёте высота (MSL) увеличивается. Меняем <= на >=
-          if (drone_gps_.alt >= start_alt + 4.5)
+          if (drone_gps_.alt >= start_alt + altitude_threshold)
           {
             RCLCPP_INFO(this->get_logger(), "✅ Altitude reached.");
             break;
           }
-          if (drone_gps_.alt >= start_alt + 2.0 && cycles > 20)
+          if (drone_gps_.alt >= start_alt + min_alt_already_flying && cycles > min_cycles_already_flying)
           {
             RCLCPP_INFO(this->get_logger(), "✅ Already flying.");
             break;
           }
         }
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+      // 🆕 Короткий сон с проверкой прерывания (вместо одного длинного sleep)
+      for (int i = 0; i < 20; i++) // 20 * 1ms = 20ms
+      {
+        if (takeoff_abort_)
+        {
+          RCLCPP_INFO(this->get_logger(), "🛑 Takeoff aborted by command");
+          takeoff_running_ = false;
+          return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
       cycles++;
+    }
+
+    takeoff_running_ = false;
+
+    // 🆕 Если высота не достигнута — всё равно продолжаем к poll targets
+    // и переходим в режим детекции/удержания цели
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (drone_gps_.is_valid && !std::isnan(start_alt))
+      {
+        double current_alt = drone_gps_.alt;
+        if (current_alt < start_alt + altitude_threshold)
+        {
+          RCLCPP_WARN(this->get_logger(),
+              "⚠️ Target altitude not reached (alt=%.1f, target=%.1f). Proceeding to detection mode anyway.",
+              current_alt, -target_z);
+        }
+      }
+    }
+    }  // end of else (skip_takeoff == false)
+
+    // 🆕 Если ref_gps_ не установлен (skip_takeoff=true), но GPS валиден — устанавливаем
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (!ref_gps_valid_ && drone_gps_.is_valid)
+      {
+        ref_gps_.lat = drone_gps_.lat;
+        ref_gps_.lon = drone_gps_.lon;
+        ref_gps_.alt = drone_gps_.alt;
+        ref_gps_valid_ = true;
+        RCLCPP_INFO(this->get_logger(), "📍 Reference GPS set before poll: %.6f, %.6f, %.2f",
+                    ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+      }
     }
 
     // 4. Poll targets

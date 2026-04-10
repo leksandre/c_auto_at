@@ -70,6 +70,7 @@ private:
   std::map<std::string, std::deque<std::pair<uint64_t, std::shared_ptr<void>>>> buffers_;
   mutable std::mutex mutex_;  // Защита буферов
   size_t sync_count_{0};      // Счётчик синхронизаций
+  size_t add_count_{0};       // Счётчик добавлений сообщений
 
   std::shared_ptr<void> getNearest_(const std::string& source, uint64_t ref);
   void dropUntil_(const std::string& source, uint64_t ref_time);
