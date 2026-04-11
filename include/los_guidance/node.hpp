@@ -44,6 +44,7 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <ai_service/msg/tracker_result.hpp>
 #include <std_srvs/srv/set_bool.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 #include <Eigen/Dense>
 #include "los_guidance/target_tracker.hpp"
@@ -268,6 +269,15 @@ namespace los_guidance
         const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
         std::shared_ptr<std_srvs::srv::SetBool::Response> response);
 
+    /**
+     * @brief Сервис сброса аварийной остановки
+     * @param request Запрос
+     * @param response Ответ
+     */
+    void emergencyResetService(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+
     // === Timer Callbacks ===
     /**
      * @brief Основной цикл управления (вызывается по таймеру)
@@ -321,6 +331,7 @@ namespace los_guidance
 
     // === ROS2 Services ===
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr auto_attack_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr emergency_reset_srv_;
 
     // === ROS2 Timer ===
     rclcpp::TimerBase::SharedPtr timer_;
@@ -353,7 +364,8 @@ namespace los_guidance
     {
       IDLE,
       GPS_APPROACH,
-      VISUAL_ATTACK
+      VISUAL_ATTACK, 
+      VISUAL_SEARCH
     };
     AutoPhase auto_phase_ = AutoPhase::IDLE;
 
@@ -387,6 +399,7 @@ namespace los_guidance
 
     std::atomic<bool> takeoff_running_{false};   // 🆕 Флаг: взлёт активен
     std::atomic<bool> takeoff_abort_{false};      // 🆕 Флаг: прервать взлёт
+    std::atomic<bool> emergency_stop_{false};     // 🆕 Флаг: аварийная остановка (блокирует ВСЕ команды)
 
     rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr gps_pos_sub_;
     void vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
@@ -394,6 +407,9 @@ namespace los_guidance
     void executeAutoModeSequence();
     static double haversineDist(double lat1, double lon1, double lat2, double lon2);
     static bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
+
+    // 🆕 Обработка прерывания взлёта
+    void handleTakeoffAbort();
   };
 
   // === Математика расстояний (Haversine) ===

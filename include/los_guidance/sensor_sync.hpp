@@ -23,6 +23,7 @@ struct SyncConfig {
   size_t buffer_size{100};
   int retention_us{200000};  // 200ms
   bool debug{false};
+  int debug_log_interval{500};  // Периодичность отладочных логов (вывод всегда на 1-м и каждый N-й раз)
 };
 
 /**

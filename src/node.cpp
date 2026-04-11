@@ -491,6 +491,12 @@ namespace los_guidance
         std::bind(&Node::autoAttackService, this,
                   std::placeholders::_1, std::placeholders::_2));
 
+    // 🆕 Сервис сброса аварийной остановки
+    emergency_reset_srv_ = this->create_service<std_srvs::srv::Trigger>(
+        "emergency_reset",
+        std::bind(&Node::emergencyResetService, this,
+                  std::placeholders::_1, std::placeholders::_2));
+
     RCLCPP_INFO(this->get_logger(), "Services created successfully");
   }
 
@@ -871,12 +877,49 @@ namespace los_guidance
     }
   }
 
+  // 🆕 Сервис сброса аварийной остановки
+  void Node::emergencyResetService(
+      const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+
+    if (emergency_stop_)
+    {
+      emergency_stop_ = false;
+      takeoff_abort_ = false;
+      takeoff_running_ = false;
+      auto_phase_ = AutoPhase::IDLE;
+      attack_enabled_ = false;
+      attack_ready_ = false;
+      start_attack_ = false;
+
+      response->success = true;
+      response->message = "Emergency stop RESET. System IDLE.";
+      RCLCPP_INFO(this->get_logger(), "✅ %s", response->message.c_str());
+    }
+    else
+    {
+      response->success = true;
+      response->message = "No emergency stop active. System is normal.";
+      RCLCPP_INFO(this->get_logger(), "ℹ️ %s", response->message.c_str());
+    }
+  }
+
   // ============================================================================
   // Timer Callback (основной цикл)
   // ============================================================================
 
   void Node::controlLoopTimerCallback()
   {
+    // 🆕 АВАРИЙНАЯ ОСТАНОВКА: блокируем ВСЕ команды немедленно
+    if (emergency_stop_)
+    {
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                           "🛑 EMERGENCY STOP active — all commands blocked");
+      return;
+    }
+
     std::unique_lock<std::mutex> lock(state_mutex_); // блять блочит весь цикл...
 
     // === ФАЗА 1: СБЛИЖЕНИЕ ПО GPS ===
@@ -982,7 +1025,7 @@ namespace los_guidance
       }
 
       // Условие перехода в атаку: камера видит цель И расстояние < 200м
-      if (camera_locked && current_dist < 200.0)
+      if (camera_locked ) // && current_dist < 200.0 // потом добавил условие на дистанцию
       {
         auto_phase_ = AutoPhase::VISUAL_ATTACK;
         start_attack_ = true;
@@ -1056,8 +1099,8 @@ namespace los_guidance
     }
 
     // === ФАЗА 3: ЛЕГАСИ / РУЧНОЙ ТРИГГЕР (TCP start_attack / RC) ===
-    if (!attack_ready_)
-      return;
+    // if (!attack_ready_)
+    //   return;
     bool should_attack = (start_attack_ || attack_enabled_);
     if (should_attack)
     {
@@ -1241,6 +1284,58 @@ namespace los_guidance
   }
 
   // === Основная авто-последовательность ===
+
+  // 🆕 Обработка прерывания взлёта: логирование, переключение в ручной режим, DISARM
+  void Node::handleTakeoffAbort()
+  {
+    RCLCPP_INFO(this->get_logger(), "🛑 Takeoff aborted by command");
+    takeoff_running_ = false;
+
+    // 🆕 БЛОКИРУЕМ основной цикл НЕМЕДЛЕННО
+    emergency_stop_ = true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50)); // Даём основному циклу заметить флаг
+
+    // 🆕 Переводим в ручной режим (однократно, не в цикле)
+    RCLCPP_INFO(this->get_logger(), "📻 Switching to MANUAL mode...");
+    for (int i = 0; i < 20; i++)
+    {
+      vehicle_ctrl_->setManualMode();
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    // 🆕 Отправляем DISARM
+    RCLCPP_INFO(this->get_logger(), "🔓 Sending DISARM command...");
+    for (int i = 0; i < 20; i++)
+    {
+      px4_msgs::msg::VehicleCommand disarm_cmd;
+      disarm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+      disarm_cmd.param1 = 0.0f; // 0 = disarm
+      disarm_cmd.target_system = 1;
+      disarm_cmd.target_component = 1;
+      disarm_cmd.from_external = true;
+      disarm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+      vehicle_cmd_pub_->publish(disarm_cmd);
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    // 🆕 Публикуем NAN setpoint чтобы PX4 остановился
+    RCLCPP_INFO(this->get_logger(), "🚫 Publishing NAN setpoint to stop PX4...");
+    for (int i = 0; i < 20; i++)
+    {
+      px4_msgs::msg::TrajectorySetpoint ts;
+      ts.position = {NAN, NAN, NAN};
+      ts.velocity = {NAN, NAN, NAN};
+      ts.acceleration = {NAN, NAN, NAN};
+      ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+      trajectory_setpoint_pub_->publish(ts);
+      vehicle_ctrl_->publishOffboardControlMode();
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    RCLCPP_INFO(this->get_logger(), "✅ Takeoff abort complete. Emergency stop ACTIVE.");
+    RCLCPP_INFO(this->get_logger(), "🔄 Call /emergency_reset service to resume operations");
+  }
+
   void Node::executeAutoModeSequence()
   {
     RCLCPP_INFO(this->get_logger(), "🚀 Starting AUTO mode sequence...");
@@ -1315,7 +1410,7 @@ namespace los_guidance
           ref_gps_.alt = drone_gps_.alt;
           ref_gps_valid_ = true;
           target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt}; // hover на месте
-          RCLCPP_INFO(this->get_logger(), "📍 Hover GPS: %.6f, %.6f, %.2f",
+          RCLCPP_INFO(this->get_logger(), "📍 Hover GPS:  \n  %.6f, \n %.6f, \n %.2f",
                       drone_gps_.lat, drone_gps_.lon, drone_gps_.alt);
         }
         else
@@ -1382,35 +1477,7 @@ namespace los_guidance
 
         if (takeoff_abort_)
         {
-
-            RCLCPP_INFO(this->get_logger(), "2🛑 Takeoff aborted by command");
-
-          std::this_thread::sleep_for(std::chrono::seconds(4));
-
-          RCLCPP_INFO(this->get_logger(), "📻 --!!!!!!!!!!-----Switching to manual...");
-          for (int i = 0; i < 10; i++)
-          {
-            vehicle_ctrl_->setManualMode();
-            
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-          }
-          std::this_thread::sleep_for(std::chrono::seconds(1));
-
-          // 🆕 Отправляем команду DISARM в PX4 перед выходом из цикла взлёта
-          RCLCPP_INFO(this->get_logger(), "🔓 -------Sending DISARM command...");
-          for (int i = 0; i < 100; i++)
-          {
-            px4_msgs::msg::VehicleCommand disarm_cmd;
-            disarm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
-            disarm_cmd.param1 = 0.0f; // 0 = disarm
-            disarm_cmd.target_system = 1;
-            disarm_cmd.target_component = 1;
-            disarm_cmd.from_external = true;
-            disarm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-            vehicle_cmd_pub_->publish(disarm_cmd);
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-          }
-
+          handleTakeoffAbort();
           return;
         }
 
@@ -1516,33 +1583,7 @@ namespace los_guidance
         {
           if (takeoff_abort_)
           {
-            RCLCPP_INFO(this->get_logger(), "3🛑 Takeoff aborted by command");
-            takeoff_running_ = false;
-            std::this_thread::sleep_for(std::chrono::seconds(4));
-            RCLCPP_INFO(this->get_logger(), "📻 --!!!!!!!!!!-----Switching to manual...");
-            for (int i = 0; i < 100; i++)
-            {
-              vehicle_ctrl_->setManualMode();
-              
-              std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-
-            // 🆕 Отправляем команду DISARM в PX4 перед выходом из цикла взлёта
-            RCLCPP_INFO(this->get_logger(), "🔓 -------Sending DISARM command...");
-            for (int i = 0; i < 100; i++)
-            {
-              px4_msgs::msg::VehicleCommand disarm_cmd;
-              disarm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
-              disarm_cmd.param1 = 0.0f; // 0 = disarm
-              disarm_cmd.target_system = 1;
-              disarm_cmd.target_component = 1;
-              disarm_cmd.from_external = true;
-              disarm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-              vehicle_cmd_pub_->publish(disarm_cmd);
-              std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-
+            handleTakeoffAbort();
             return;
           }
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1569,6 +1610,9 @@ namespace los_guidance
       }
     } // end of else (skip_takeoff == false)
 
+
+    RCLCPP_WARN(this->get_logger(), "step 1");
+
     // 🆕 Если ref_gps_ не установлен (skip_takeoff=true), но GPS валиден — устанавливаем
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1583,11 +1627,25 @@ namespace los_guidance
       }
     }
 
+
+    RCLCPP_WARN(this->get_logger(), "step 2");
+
+
+    // 🆕 Визуальный поиск цели после взлёта (висим на месте, ждём обнаружения камерой)
+    this->declare_parameter("takeoff.visual_searching", false);
+    this->declare_parameter("takeoff.visual_search_timeout_s", 300); // 5 минут по умолчанию
+    bool visual_searching = this->get_parameter("takeoff.visual_searching").as_bool();
+    int visual_search_timeout_s = this->get_parameter("takeoff.visual_search_timeout_s").as_int();
+    
+    RCLCPP_INFO(this->get_logger(), " --- visual_searching %s", visual_searching ? "TRUE" : "FALSE");
+
+
     // 4. Poll targets
     if (commander_targets_.empty())
     {
       RCLCPP_WARN(this->get_logger(), "⚠️ No targets. Aborting.");
-      return;
+      //visual_searching = true; // может так??
+      //return;
     }
 
     RCLCPP_INFO(this->get_logger(), "📡 Polling %zu targets...", commander_targets_.size());
@@ -1628,16 +1686,12 @@ namespace los_guidance
       }
     }
 
-    // 🆕 Визуальный поиск цели после взлёта (висим на месте, ждём обнаружения камерой)
-    this->declare_parameter("takeoff.visual_searching", false);
-    this->declare_parameter("takeoff.visual_search_timeout_s", 300); // 5 минут по умолчанию
-    bool visual_searching = this->get_parameter("takeoff.visual_searching").as_bool();
-    int visual_search_timeout_s = this->get_parameter("takeoff.visual_search_timeout_s").as_int();
-
     if (visual_searching)
     {
       RCLCPP_INFO(this->get_logger(), "🔍 Visual search mode: hovering for %d seconds waiting for target detection...",
                   visual_search_timeout_s);
+
+      auto_phase_ = AutoPhase::VISUAL_SEARCH;
 
       // Устанавливаем hover на текущей позиции
       {
@@ -1660,34 +1714,7 @@ namespace los_guidance
 
         if (takeoff_abort_)
         {
-          RCLCPP_INFO(this->get_logger(), "4!!!!!!!!!!!!!!----------🛑 Takeoff aborted by command");
-          takeoff_running_ = false;
-
-          std::this_thread::sleep_for(std::chrono::seconds(4));
-          RCLCPP_INFO(this->get_logger(), "📻 --!!!!!!!!!!-----Switching to manual...");
-          for (int i = 0; i < 100; i++)
-          {
-            vehicle_ctrl_->setManualMode();
-            
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-          }
-          std::this_thread::sleep_for(std::chrono::seconds(1));
-
-          // 🆕 Отправляем команду DISARM в PX4 перед выходом из цикла взлёта
-          RCLCPP_INFO(this->get_logger(), "🔓 -------Sending DISARM command...");
-          for (int i = 0; i < 100; i++)
-          {
-            px4_msgs::msg::VehicleCommand disarm_cmd;
-            disarm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
-            disarm_cmd.param1 = 0.0f; // 0 = disarm
-            disarm_cmd.target_system = 1;
-            disarm_cmd.target_component = 1;
-            disarm_cmd.from_external = true;
-            disarm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-            vehicle_cmd_pub_->publish(disarm_cmd);
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-          }
-
+          handleTakeoffAbort();
           return;
         }
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
@@ -1730,33 +1757,8 @@ namespace los_guidance
         {
           if (takeoff_abort_)
           {
-            RCLCPP_INFO(this->get_logger(), "🛑 5Visual search aborted by command");
-            takeoff_running_ = false;
-            std::this_thread::sleep_for(std::chrono::seconds(4));
-
-            RCLCPP_INFO(this->get_logger(), "📻 --!!!!!!!!!!-----Switching to manual...");
-            for (int i = 0; i < 100; i++)
-            {
-              vehicle_ctrl_->setManualMode();
-              
-              std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-
-            // 🆕 Отправляем команду DISARM в PX4 перед выходом из цикла взлёта
-            RCLCPP_INFO(this->get_logger(), "🔓 -------Sending DISARM command...");
-            for (int i = 0; i < 100; i++)
-            {
-              px4_msgs::msg::VehicleCommand disarm_cmd;
-              disarm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
-              disarm_cmd.param1 = 0.0f; // 0 = disarm
-              disarm_cmd.target_system = 1;
-              disarm_cmd.target_component = 1;
-              disarm_cmd.from_external = true;
-              disarm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-              vehicle_cmd_pub_->publish(disarm_cmd);
-              std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
+            handleTakeoffAbort();
+            return;
           }
           std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }

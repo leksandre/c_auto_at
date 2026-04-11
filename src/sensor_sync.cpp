@@ -71,7 +71,7 @@ void SensorSync::addMessage(
   
   if (config_.debug) {
     add_count_++;
-    if (add_count_ % 500 == 0) {
+    if (add_count_ == 1 || add_count_ % config_.debug_log_interval == 0) {
       std::cout << "[SensorSync] Added message to '" << source
                 << "' at " << ts_us << " us, buffer size: "
                 << buf.size() << std::endl;
@@ -94,8 +94,8 @@ std::map<std::string, std::shared_ptr<void>> SensorSync::sync(uint64_t ref_time)
 
   if (config_.debug) {
     sync_count_++;
-    if (sync_count_ % 500 == 0) {
-      std::cout << "[SensorSync] Sync completed at " << ref_time 
+    if (sync_count_ == 1 || sync_count_ % config_.debug_log_interval == 0) {
+      std::cout << "[SensorSync] Sync completed at " << ref_time
                 << " us, sources: " << result.size() << std::endl;
     }
   }
@@ -136,10 +136,14 @@ std::shared_ptr<void> SensorSync::getNearest_(
   }
   
   if (config_.debug && nearest) {
-    std::cout << "[SensorSync] Source: " << source
-              << " | Ref: " << ref
-              << " | Nearest: " << nearest_ts
-              << " | Diff: " << min_diff << " us" << std::endl;
+    static int debug_counter = 0;
+    ++debug_counter;
+    if (debug_counter == 1 || debug_counter % config_.debug_log_interval == 0) {
+      std::cout << "[SensorSync] Source: " << source
+                << " | Ref: " << ref
+                << " | Nearest: " << nearest_ts
+                << " | Diff: " << min_diff << " us" << std::endl;
+    }
   }
   
   return nearest;
