@@ -14,12 +14,24 @@
 
 /**
  * @brief Главная функция ROS2 узла
- * 
- * @threading_model MultiThreadedExecutor
- * - Callbacks обрабатываются в параллельных потоках
- * - Timer callback выполняется в отдельном потоке
- * - Shared state защищён mutex в контроллерах
- * 
+ *
+ * @threading_model MultiThreadedExecutor + CallbackGroups
+ *
+ * Архитектура потоков:
+ * ┌─────────────────────────────────────────────────────────────┐
+ * │  Поток 1 (Control):                                        │
+ * │  ├── PX4 telemetry (attitude, gyro, GPS, vehicle_status)   │
+ * │  ├── Control loop timer (20ms)                             │
+ * │  └── Attack signal, services                               │
+ * │                                                             │
+ * │  Поток 2 (AI):                                             │
+ * │  ├── tracker_result callback                               │
+ * │  ├── track_bbox callback                                   │
+ * │  └── AI heartbeat                                          │
+ * │                                                             │
+ * │  Lock-free queue: AI → Control (acceleration commands)     │
+ * └─────────────────────────────────────────────────────────────┘
+ *
  * @param argc Количество аргументов командной строки
  * @param argv Аргументы командной строки
  * @return int Код возврата (0 = успех)
@@ -43,33 +55,16 @@ int main(int argc, char **argv) {
   RCLCPP_INFO(los_node->get_logger(), "===========================================");
   
   // === 4. Создание MultiThreadedExecutor ===
-  // Преимущества перед rclcpp::spin():
-  // - Параллельная обработка callbacks из разных топиков
-  // - Timer callback не блокирует обработку сообщений
-  // - Лучшая отзывчивость при высокой нагрузке
-  // 
-  // ⚠️ ВАЖНО: Все shared state в контроллерах должны быть защищены mutex!
-  rclcpp::executors::MultiThreadedExecutor executor;
-  
-
-
-
-//   // Вариант 1: Явное указание количества потоков
-// rclcpp::executors::MultiThreadedExecutor executor(
-//   rclcpp::ExecutorOptions(), 
-//   4  // 4 потока
-// );
-
-// // Вариант 2: Использование количества CPU cores
-// unsigned int num_threads = std::thread::hardware_concurrency();
-// rclcpp::executors::MultiThreadedExecutor executor(
-//   rclcpp::ExecutorOptions(), 
-//   num_threads
-// );
-
-// // Вариант 3: По умолчанию (рекомендуется)
-// // Executor сам выберет оптимальное количество
-// rclcpp::executors::MultiThreadedExecutor executor;
+  // Callback groups автоматически распределяются по потокам:
+  // - ai_callback_group_ → Поток AI
+  // - control_callback_group_ → Поток управления
+  //
+  // Lock-free queue (new_acc_cmd_available_) передаёт команды AI → Control
+  // без блокировки мьютекса — AI поток никогда не ждёт control loop
+  rclcpp::executors::MultiThreadedExecutor executor(
+    rclcpp::ExecutorOptions{},
+    2
+  );
 
 
   // === 5. Добавление узла в executor ===

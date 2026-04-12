@@ -35,10 +35,11 @@ namespace los_guidance
     createSubscribers();
     createServices();
 
-    // 4. Создание таймера основного цикла
+    // 4. Создание таймера основного цикла (в control callback group)
     timer_ = this->create_wall_timer(
         std::chrono::milliseconds(config_.update_ms),
-        std::bind(&Node::controlLoopTimerCallback, this));
+        std::bind(&Node::controlLoopTimerCallback, this),
+        control_callback_group_);
 
     RCLCPP_INFO(this->get_logger(), "LOS Guidance Node initialized successfully");
   }
@@ -440,45 +441,95 @@ namespace los_guidance
   {
     RCLCPP_INFO(this->get_logger(), "Creating subscribers...");
 
+    // ========================================================================
+    // 1. Создаём callback groups
+    // ========================================================================
+    
+    // 🎯 AI callback group — для трекинга (отдельный поток в MultiThreadedExecutor)
+    ai_callback_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    // 🚀 Control callback group — для PX4 telemetry + timer
+    control_callback_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    // ========================================================================
+    // 2. PX4 Subscribers (control group — поток управления)
+    // ========================================================================
+
     // QoS для PX4 сообщений (sensor_data)
     rmw_qos_profile_t qos_profile = rmw_qos_profile_sensor_data;
     auto qos = rclcpp::QoS(rclcpp::QoSInitialization(qos_profile.history, 5), qos_profile);
 
+    auto control_sub_opts = rclcpp::SubscriptionOptions();
+    control_sub_opts.callback_group = control_callback_group_;
+
     vehicle_status_sub_ = this->create_subscription<px4_msgs::msg::VehicleStatus>(
         "fmu/out/vehicle_status",
         qos,
-        std::bind(&Node::vehicleStatusCallback, this, std::placeholders::_1));
-
-    attack_signal_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-        "/attack_signal",
-        10,
-        std::bind(&Node::attackSignalCallback, this, std::placeholders::_1));
-
-    tracker_result_sub_ = this->create_subscription<ai_service::msg::TrackerResult>(
-        "tracker_result",
-        10,
-        std::bind(&Node::trackerResultCallback, this, std::placeholders::_1));
-
-    track_bbox_sub_ = this->create_subscription<vision_msgs::msg::Detection2D>(
-        "track_bbox",
-        10,
-        std::bind(&Node::trackBBox2DCallback, this, std::placeholders::_1));
+        std::bind(&Node::vehicleStatusCallback, this, std::placeholders::_1),
+        control_sub_opts);
 
     vehicle_attitude_sub_ = this->create_subscription<px4_msgs::msg::VehicleAttitude>(
         "fmu/out/vehicle_attitude",
         qos,
-        std::bind(&Node::vehicleAttitudeCallback, this, std::placeholders::_1));
+        std::bind(&Node::vehicleAttitudeCallback, this, std::placeholders::_1),
+        control_sub_opts);
 
     vehicle_angular_velocity_sub_ = this->create_subscription<px4_msgs::msg::VehicleAngularVelocity>(
         "fmu/out/vehicle_angular_velocity",
         qos,
-        std::bind(&Node::vehicleAngularVelocityCallback, this, std::placeholders::_1));
+        std::bind(&Node::vehicleAngularVelocityCallback, this, std::placeholders::_1),
+        control_sub_opts);
 
     gps_pos_sub_ = this->create_subscription<px4_msgs::msg::VehicleGlobalPosition>(
         "/fmu/out/vehicle_global_position",
-        rclcpp::SensorDataQoS().keep_last(1), // DDS QoS для сенсоров
-        std::bind(&Node::vehicleGlobalPositionCallback, this, std::placeholders::_1));
+        rclcpp::SensorDataQoS().keep_last(1),
+        std::bind(&Node::vehicleGlobalPositionCallback, this, std::placeholders::_1),
+        control_sub_opts);
 
+    // ========================================================================
+    // 3. AI Subscribers (ai group — отдельный поток)
+    // ========================================================================
+
+    auto ai_sub_opts = rclcpp::SubscriptionOptions();
+    ai_sub_opts.callback_group = ai_callback_group_;
+
+    tracker_result_sub_ = this->create_subscription<ai_service::msg::TrackerResult>(
+        "tracker_result",
+        rclcpp::SensorDataQoS().keep_last(3),
+        std::bind(&Node::trackerResultCallback, this, std::placeholders::_1),
+        ai_sub_opts);
+
+    track_bbox_sub_ = this->create_subscription<vision_msgs::msg::Detection2D>(
+        "track_bbox",
+        10,
+        std::bind(&Node::trackBBox2DCallback, this, std::placeholders::_1),
+        ai_sub_opts);
+
+    // AI Heartbeat (тоже в AI группе)
+    heartbeat_sub_ = this->create_subscription<std_msgs::msg::Header>(
+        "/ai_heartbeat", 10,
+        [this](std_msgs::msg::Header::SharedPtr msg)
+        {
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                               "💓 AI heartbeat: %u", msg->stamp.nanosec);
+        },
+        ai_sub_opts);
+
+    // ========================================================================
+    // 4. Signal Subscribers (control group — управляющие сигналы)
+    // ========================================================================
+
+    attack_signal_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+        "/attack_signal",
+        10,
+        std::bind(&Node::attackSignalCallback, this, std::placeholders::_1),
+        control_sub_opts);
+
+    RCLCPP_INFO(this->get_logger(), "✅ Subscribers created:");
+    RCLCPP_INFO(this->get_logger(), "   🎯 AI group: tracker_result, track_bbox, ai_heartbeat");
+    RCLCPP_INFO(this->get_logger(), "   🚀 Control group: PX4 telemetry, attack_signal");
     RCLCPP_INFO(this->get_logger(), "Subscribers created successfully");
   }
 
@@ -675,22 +726,21 @@ namespace los_guidance
         // 🎯 Публикация статуса для отладки
         publishLosStatus(target, acc_cmd);
 
-        // Сохранение команды для timer callback
-        {
-          std::lock_guard<std::mutex> lock(state_mutex_);
-          // guidance_ctrl_->setLastAccelerationCommand(acc_cmd);
-          attack_ready_ = true;
-          // RCLCPP_INFO(this->get_logger(),
-          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
-                               "attack_ready_  trackerResultCallback");
+        // 🎯 Lock-free сохранение команды для timer callback (без mutex!)
+        // ✅ AI callback работает полностью независимо — никакого блокирования
+        latest_acc_cmd_.acc_cmd = acc_cmd;
+        latest_acc_cmd_.confidence = target.confidence;
+        latest_acc_cmd_.timestamp_us = msg->timestamp / 1000; // ns → us
+        latest_acc_cmd_.is_valid = true;
+        new_acc_cmd_available_.store(true, std::memory_order_release);
 
-          // === 🪵 Лог готовности к атаке ===
-          // RCLCPP_INFO(this->get_logger(),
-          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
-                               "✅ trackerResultCallback 77:  attack_ready_=true | conf=%.2f | acc=[%.2f,%.2f,%.2f]",
-                               target.confidence,
-                               acc_cmd.x(), acc_cmd.y(), acc_cmd.z());
-        }
+        // Атомарно устанавливаем attack_ready (без mutex)
+        attack_ready_.store(true, std::memory_order_release);
+
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+                             "✅ AI Thread: attack_ready_=true | conf=%.2f | acc=[%.2f,%.2f,%.2f]",
+                             target.confidence,
+                             acc_cmd.x(), acc_cmd.y(), acc_cmd.z());
       }
       else
       {
@@ -788,11 +838,16 @@ namespace los_guidance
 
         publishLosStatus(target, acc_cmd);
 
-        {
-          std::lock_guard<std::mutex> lock(state_mutex_);
-          attack_ready_ = true;
-          RCLCPP_INFO(this->get_logger(), "attack_ready_  trackBBox2DCallback");
-        }
+        // 🎯 Lock-free сохранение (как в trackerResultCallback)
+        latest_acc_cmd_.acc_cmd = acc_cmd;
+        latest_acc_cmd_.confidence = target.confidence;
+        latest_acc_cmd_.timestamp_us = static_cast<uint64_t>(msg->header.stamp.sec * 1e6) +
+                                       static_cast<uint64_t>(msg->header.stamp.nanosec * 1e-3);
+        latest_acc_cmd_.is_valid = true;
+        new_acc_cmd_available_.store(true, std::memory_order_release);
+        attack_ready_.store(true, std::memory_order_release);
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+                             "✅ AI Thread (BBox): attack_ready_=true");
       }
     }
   }
@@ -861,7 +916,7 @@ namespace los_guidance
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
 
-    if (attack_ready_)
+    if (attack_ready_.load(std::memory_order_acquire))
     {
       attack_enabled_ = request->data;
       response->success = true;
@@ -879,7 +934,7 @@ namespace los_guidance
 
   // 🆕 Сервис сброса аварийной остановки
   void Node::emergencyResetService(
-      const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+      const std::shared_ptr<std_srvs::srv::Trigger::Request> /* request */,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response)
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
@@ -891,7 +946,7 @@ namespace los_guidance
       takeoff_running_ = false;
       auto_phase_ = AutoPhase::IDLE;
       attack_enabled_ = false;
-      attack_ready_ = false;
+      attack_ready_.store(false, std::memory_order_release);
       start_attack_ = false;
 
       response->success = true;
@@ -942,7 +997,7 @@ namespace los_guidance
                                ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
       }
 
-      bool camera_locked = attack_ready_;
+      bool camera_locked = attack_ready_.load(std::memory_order_acquire);
       double current_dist = 9999.0;
       if (drone_gps_.is_valid)
       {
@@ -1049,7 +1104,7 @@ namespace los_guidance
 
     if (auto_phase_ == AutoPhase::VISUAL_ATTACK)
     {
-      if (!attack_ready_)
+      if (!attack_ready_.load(std::memory_order_acquire))
       {
         // 🔄 Цель потеряна — возвращаемся к подлёту по GPS (не останавливаемся!)
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
@@ -1061,6 +1116,14 @@ namespace los_guidance
       }
       else
       {
+        // 🎯 Читаем команду ускорения из lock-free очереди
+        Eigen::Vector3d acc_cmd = guidance_ctrl_->getLastAccelerationCommand(); // default
+        if (new_acc_cmd_available_.load(std::memory_order_acquire))
+        {
+          acc_cmd = latest_acc_cmd_.acc_cmd;
+          new_acc_cmd_available_.store(false, std::memory_order_release);
+        }
+
         // Цель видима — выполняем визуальную атаку
         bool should_attack = (start_attack_ || attack_enabled_);
         if (should_attack)
@@ -1069,15 +1132,13 @@ namespace los_guidance
           {
             update_acc_setpoint_ = true;
             vehicle_ctrl_->publishOffboardControlMode();
-            vehicle_ctrl_->publishAccelerationSetpoint(
-                guidance_ctrl_->getLastAccelerationCommand());
+            vehicle_ctrl_->publishAccelerationSetpoint(acc_cmd);
           }
           else
           {
             guidance_ctrl_->reset();
             vehicle_ctrl_->publishOffboardControlMode();
-            vehicle_ctrl_->publishAccelerationSetpoint(
-                guidance_ctrl_->getLastAccelerationCommand());
+            vehicle_ctrl_->publishAccelerationSetpoint(acc_cmd);
             vehicle_ctrl_->setOffboardMode();
           }
         }
@@ -1424,7 +1485,7 @@ namespace los_guidance
         auto_phase_ = AutoPhase::GPS_APPROACH;
         start_attack_ = false;
         attack_enabled_ = false;
-        attack_ready_ = false;
+        attack_ready_.store(false, std::memory_order_release);
       }
 
       // 🆕 Публикуем hover setpoint многократно
@@ -1515,7 +1576,7 @@ namespace los_guidance
             auto_phase_ = AutoPhase::GPS_APPROACH;
             start_attack_ = false;
             attack_enabled_ = false;
-            attack_ready_ = false;
+            attack_ready_.store(false, std::memory_order_release);
           }
 
           if (gps_valid && !std::isnan(start_alt))
@@ -1705,7 +1766,7 @@ namespace los_guidance
         auto_phase_ = AutoPhase::GPS_APPROACH;
         start_attack_ = false;
         attack_enabled_ = false;
-        attack_ready_ = false;
+        attack_ready_.store(false, std::memory_order_release);
       }
 
       auto search_start = std::chrono::steady_clock::now();
@@ -1732,7 +1793,7 @@ namespace los_guidance
 
         {
           std::lock_guard<std::mutex> lock(state_mutex_);
-          if (attack_ready_)
+          if (attack_ready_.load(std::memory_order_acquire))
           {
             RCLCPP_INFO(this->get_logger(), "🎯 Target detected by camera after %ld seconds!",
                         elapsed);
@@ -1791,7 +1852,7 @@ namespace los_guidance
       target_gps_ = {closest_lat, closest_lon, closest_alt};
       closest_target_ip_ = closest_ip; // 🆕 Сохраняем IP для периодического опроса
       auto_phase_ = AutoPhase::GPS_APPROACH;
-      attack_ready_ = false;
+      attack_ready_.store(false, std::memory_order_release);
     }
     else
     {
@@ -1811,7 +1872,7 @@ namespace los_guidance
       }
       closest_target_ip_ = ""; // Пока нет цели
       auto_phase_ = AutoPhase::GPS_APPROACH;
-      attack_ready_ = false;
+      attack_ready_.store(false, std::memory_order_release);
     }
   }
 

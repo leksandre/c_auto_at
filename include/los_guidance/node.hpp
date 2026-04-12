@@ -21,6 +21,8 @@
 #include <vector>
 #include <mutex>
 #include <limits>
+#include <atomic>
+#include <optional>
 
 // === Сетевые заголовки (для TCP клиента/сервера) ===
 #include <sys/socket.h>
@@ -321,6 +323,7 @@ namespace los_guidance
     rclcpp::Subscription<vision_msgs::msg::Detection2D>::SharedPtr track_bbox_sub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleAttitude>::SharedPtr vehicle_attitude_sub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleAngularVelocity>::SharedPtr vehicle_angular_velocity_sub_;
+    rclcpp::Subscription<std_msgs::msg::Header>::SharedPtr heartbeat_sub_;  ///< AI heartbeat
 
     // === ROS2 Publishers ===
     rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr vehicle_cmd_pub_;
@@ -336,6 +339,10 @@ namespace los_guidance
     // === ROS2 Timer ===
     rclcpp::TimerBase::SharedPtr timer_;
 
+    // === Callback Groups (для разделения AI и control flow) ===
+    rclcpp::CallbackGroup::SharedPtr ai_callback_group_;      ///< Группа для AI подписок (отдельный поток)
+    rclcpp::CallbackGroup::SharedPtr control_callback_group_; ///< Группа для PX4 telemetry + timer
+
     // === Добавьте после существующих полей ===
     double start_lat_{0.0}, start_lon_{0.0}, start_alt_{0.0};
     bool start_gps_valid_{false};
@@ -344,7 +351,7 @@ namespace los_guidance
     mutable std::mutex state_mutex_;  ///< Защита состояния
     bool attack_enabled_{false};      ///< Авто-атака включена
     bool start_attack_{false};        ///< Сигнал начала атаки
-    bool attack_ready_{false};        ///< Система готова к атаке
+    std::atomic<bool> attack_ready_{false}; ///< Система готова к атаке (lock-free)
     bool update_acc_setpoint_{false}; ///< Флаг обновления ускорения
 
     // === Ключи синхронизации ===
@@ -400,6 +407,18 @@ namespace los_guidance
     std::atomic<bool> takeoff_running_{false};   // 🆕 Флаг: взлёт активен
     std::atomic<bool> takeoff_abort_{false};      // 🆕 Флаг: прервать взлёт
     std::atomic<bool> emergency_stop_{false};     // 🆕 Флаг: аварийная остановка (блокирует ВСЕ команды)
+
+    // === Lock-free очередь команд от AI к control loop ===
+    // 🎯 Позволяет AI callback работать в отдельном потоке без блокировки mutex
+    struct AccelerationCommand
+    {
+      Eigen::Vector3d acc_cmd = Eigen::Vector3d::Zero();
+      double confidence = 0.0;
+      uint64_t timestamp_us = 0;
+      bool is_valid = false;
+    };
+    std::atomic<bool> new_acc_cmd_available_{false};  // Флаг: новая команда готова
+    AccelerationCommand latest_acc_cmd_;              // Последняя команда (защищена флагом)
 
     rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr gps_pos_sub_;
     void vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
