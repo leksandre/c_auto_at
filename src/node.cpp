@@ -531,7 +531,7 @@ namespace los_guidance
   }
 
   void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg)
-  {
+  { 
 
     // === 🪵 ОТЛАДОЧНЫЕ ЛОГИ (добавить в начало) ===
     if (config_.debug)
@@ -1395,6 +1395,8 @@ namespace los_guidance
 
     RCLCPP_INFO(this->get_logger(), "🔧 !!!!!!!!!!!!! skip_takeoff = : %s ",
                 skip_takeoff ? "TRUE" : "FALSE");
+    RCLCPP_INFO(this->get_logger(), "🔧 !!!!!!!!!!!!! debug = : %s ",
+                config_.debug ? "TRUE" : "FALSE"); 
 
     if (skip_takeoff)
     {
