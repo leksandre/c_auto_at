@@ -97,6 +97,10 @@ namespace los_guidance
     config_.use_gyro_comp = this->get_parameter("kalman.use_gyro_compensation").as_bool();
     config_.debug = this->get_parameter("sync.debug").as_bool();
 
+    // === Логирование ===
+    this->declare_parameter("logging.throttle_interval_ms", 12000);
+    config_.log_throttle_interval_ms = this->get_parameter("logging.throttle_interval_ms").as_int();
+
     // === Ограничения ===
     this->declare_parameter("guidance.max_tilt_deg", 45.0);
     this->declare_parameter("guidance.min_tilt_deg", 5.0);
@@ -596,7 +600,7 @@ namespace los_guidance
     uint64_t ref_us = msg->timestamp / 1000; // ns → us
 
     // RCLCPP_INFO(this->get_logger(), "🔍 trackerResultCallback 11: ref_us=%lu", ref_us);
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000, "🔍 trackerResultCallback 11: ref_us=%lu", ref_us);
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms, "🔍 trackerResultCallback 11: ref_us=%lu", ref_us);
 
     // Синхронизация с attitude и gyro
     auto sync_msg = sensor_sync_->sync(ref_us);
@@ -625,13 +629,13 @@ namespace los_guidance
     gyro_ready = true;
 
     // RCLCPP_INFO(this->get_logger(), "   quat_ready=%d, gyro_ready=%d", quat_ready, gyro_ready);
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000, "   quat_ready=%d, gyro_ready=%d", quat_ready, gyro_ready);
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms, "   quat_ready=%d, gyro_ready=%d", quat_ready, gyro_ready);
 
     // === 🪵 Лог синхронизации ===
     if (config_.debug)
     {
       // RCLCPP_DEBUG(this->get_logger(),
-      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
                            "🔗 Sync: trackerResultCallback 22:  quat=%d, gyro=%d, ref_us=%lu",
                            quat_ready ? 1 : 0,
                            gyro_ready ? 1 : 0,
@@ -660,7 +664,7 @@ namespace los_guidance
       if (config_.debug)
       {
         // RCLCPP_DEBUG(this->get_logger(),
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
                              "🎯 Target: trackerResultCallback 33:  pixel=(%.1f,%.1f)→(%.1f,%.1f), conf=%.3f, valid=%d",
                              target.pixel_u, target.pixel_v,
                              target.pixel_u_smooth, target.pixel_v_smooth,
@@ -671,16 +675,16 @@ namespace los_guidance
       if (target.is_valid)
       {
         // RCLCPP_INFO(this->get_logger(),
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
                              " trackerResultCallback 44:   ✅ target.valid=true, confidence=%.2f", target.confidence);
         // RCLCPP_INFO(this->get_logger(),
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
                              "   🎯 Setting attack_ready_=true");
       }
       else
       {
         // RCLCPP_WARN(this->get_logger(),
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
                              "  trackerResultCallback 44:  ❌ target.valid=false");
       }
 
@@ -698,7 +702,7 @@ namespace los_guidance
         if (config_.debug)
         {
           // RCLCPP_DEBUG(this->get_logger(),
-          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
                                "📐 LOS: trackerResultCallback 55:  nav=[%.3f,%.3f,%.3f], lambda=[%.3f,%.3f,%.3f]",
                                u_los.x(), u_los.y(), u_los.z(),
                                lambda.x(), lambda.y(), lambda.z());
@@ -718,7 +722,7 @@ namespace los_guidance
         if (config_.debug)
         {
           // RCLCPP_DEBUG(this->get_logger(),
-          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
                                "🚀 Acc cmd: trackerResultCallback 66:  [%.3f, %.3f, %.3f] m/s²",
                                acc_cmd.x(), acc_cmd.y(), acc_cmd.z());
         }
@@ -737,7 +741,7 @@ namespace los_guidance
         // Атомарно устанавливаем attack_ready (без mutex)
         attack_ready_.store(true, std::memory_order_release);
 
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
                              "✅ AI Thread: attack_ready_=true | conf=%.2f | acc=[%.2f,%.2f,%.2f]",
                              target.confidence,
                              acc_cmd.x(), acc_cmd.y(), acc_cmd.z());
@@ -748,7 +752,7 @@ namespace los_guidance
         if (config_.debug)
         {
           // RCLCPP_WARN(this->get_logger(),
-          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
                                "❌ trackerResultCallback 77:  Target invalid: conf=%.3f < min_confidence=%.3f",
                                target.confidence,
                                tracker_config_.min_confidence);
@@ -846,7 +850,7 @@ namespace los_guidance
         latest_acc_cmd_.is_valid = true;
         new_acc_cmd_available_.store(true, std::memory_order_release);
         attack_ready_.store(true, std::memory_order_release);
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 12000,
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
                              "✅ AI Thread (BBox): attack_ready_=true");
       }
     }
@@ -975,6 +979,7 @@ namespace los_guidance
       return;
     }
 
+    // vehicle_ctrl_->publishOffboardControlMode();
     std::unique_lock<std::mutex> lock(state_mutex_); // блять блочит весь цикл...
 
     // === ФАЗА 1: СБЛИЖЕНИЕ ПО GPS ===
@@ -1023,13 +1028,12 @@ namespace los_guidance
           RCLCPP_INFO(this->get_logger(), "🔍 Scanning all targets for available target...");
           std::string found_ip;
           double found_lat = 0, found_lon = 0, found_alt = 0;
-          double my_lat = 0, my_lon = 0;
+          double my_lat = 0;
           {
             std::lock_guard<std::mutex> gps_lock(state_mutex_);
             if (drone_gps_.is_valid)
             {
               my_lat = drone_gps_.lat;
-              my_lon = drone_gps_.lon;
             }
           }
 
@@ -1116,6 +1120,14 @@ namespace los_guidance
       }
       else
       {
+
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
+    "🔍 TIMER: phase=%d, ready=%d, should_attack=%d", 
+    (int)auto_phase_, 
+    attack_ready_.load() ? 1 : 0, 
+    (start_attack_ || attack_enabled_) ? 1 : 0);
+
+
         // 🎯 Читаем команду ускорения из lock-free очереди
         Eigen::Vector3d acc_cmd = guidance_ctrl_->getLastAccelerationCommand(); // default
         if (new_acc_cmd_available_.load(std::memory_order_acquire))
@@ -1128,14 +1140,28 @@ namespace los_guidance
         bool should_attack = (start_attack_ || attack_enabled_);
         if (should_attack)
         {
+          
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
+            "----------should_attack");
+
           if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD)
           {
+
+
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
+            "----------FlightMode::OFFBOARD");
+
+
             update_acc_setpoint_ = true;
             vehicle_ctrl_->publishOffboardControlMode();
             vehicle_ctrl_->publishAccelerationSetpoint(acc_cmd);
           }
           else
           {
+
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
+            "----------reset");
+
             guidance_ctrl_->reset();
             vehicle_ctrl_->publishOffboardControlMode();
             vehicle_ctrl_->publishAccelerationSetpoint(acc_cmd);
@@ -1144,8 +1170,12 @@ namespace los_guidance
         }
         else
         {
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
+            "----------NOT should_attack");
           if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD && update_acc_setpoint_)
           {
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
+            "---------- var 2 FlightMode::OFFBOARD");
             guidance_ctrl_->reset();
             vehicle_ctrl_->setManualMode();
             update_acc_setpoint_ = false;
@@ -1451,8 +1481,10 @@ namespace los_guidance
     this->declare_parameter("takeoff.min_altitude_already_flying_m", 2.0);
     this->declare_parameter("takeoff.min_cycles_for_already_flying", 20);
     this->declare_parameter("takeoff.skip", false); // 🆕 Пропуск этапа взлёта
+    this->declare_parameter("takeoff.timeout_s", 20); // 🆕 Таймаут взлёта (секунды)
 
     bool skip_takeoff = this->get_parameter("takeoff.skip").as_bool();
+    int takeoff_timeout_s = this->get_parameter("takeoff.timeout_s").as_int();
 
     RCLCPP_INFO(this->get_logger(), "🔧 !!!!!!!!!!!!! skip_takeoff = : %s ",
                 skip_takeoff ? "TRUE" : "FALSE");
@@ -1512,14 +1544,15 @@ namespace los_guidance
       float min_alt_already_flying = static_cast<float>(this->get_parameter("takeoff.min_altitude_already_flying_m").as_double());
       int min_cycles_already_flying = static_cast<int>(this->get_parameter("takeoff.min_cycles_for_already_flying").as_int());
 
-      RCLCPP_INFO(this->get_logger(), "🛫 Takeoff: target=%.1fm, climb=%.1fm/s, threshold=%.1fm",
-                  -target_z, vz, altitude_threshold);
+      RCLCPP_INFO(this->get_logger(), "🛫 Takeoff: target=%.1fm, climb=%.1fm/s, threshold=%.1fm, timeout=%ds",
+                  -target_z, vz, altitude_threshold, takeoff_timeout_s);
 
       // 🆕 Флаги для прерывания взлёта командами
       takeoff_running_ = true;
       takeoff_abort_ = false;
 
       int cycles = 0;
+      auto takeoff_start_time = std::chrono::steady_clock::now();
 
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1614,6 +1647,17 @@ namespace los_guidance
             }
           }
           return;
+        }
+
+        // 🆕 Проверка таймаута взлёта
+        auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - takeoff_start_time).count();
+        if (elapsed_s >= takeoff_timeout_s)
+        {
+          RCLCPP_WARN(this->get_logger(), "⏱️ Takeoff timeout: %ds elapsed, target_alt=%.1fm, current_alt=%.1fm. Proceeding anyway.",
+                      static_cast<int>(elapsed_s), -target_z,
+                      drone_gps_.is_valid ? drone_gps_.alt : NAN);
+          break;
         }
 
         px4_msgs::msg::TrajectorySetpoint ts;
@@ -1766,7 +1810,9 @@ namespace los_guidance
         auto_phase_ = AutoPhase::GPS_APPROACH;
         start_attack_ = false;
         attack_enabled_ = false;
-        attack_ready_.store(false, std::memory_order_release);
+        //attack_ready_.store(false, std::memory_order_release);
+        RCLCPP_INFO(this->get_logger(), "🔍 Visual search init: attack_ready_ preserved as %s", 
+            attack_ready_.load() ? "true" : "false");
       }
 
       auto search_start = std::chrono::steady_clock::now();

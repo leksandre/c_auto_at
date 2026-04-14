@@ -204,7 +204,7 @@ bool VehicleController::publishAccelerationSetpoint(
   acc_smooth = clampAcceleration_(acc_smooth);
   
   // Публикация offboard control mode (должна публиковаться регулярно)
-  publishOffboardControlMode();
+  // publishOffboardControlMode();
   
   // Публикация trajectory setpoint
   px4_msgs::msg::TrajectorySetpoint msg;
@@ -245,7 +245,7 @@ bool VehicleController::publishVelocitySetpoint(
     return false;
   }
   
-  publishOffboardControlMode();
+  // publishOffboardControlMode();
   
   px4_msgs::msg::TrajectorySetpoint msg;
   msg.position = {NAN, NAN, NAN};
@@ -276,7 +276,7 @@ bool VehicleController::publishPositionSetpoint(
     return false;
   }
   
-  publishOffboardControlMode();
+  // publishOffboardControlMode();
   
   px4_msgs::msg::TrajectorySetpoint msg;
   msg.position = {
@@ -324,7 +324,7 @@ bool VehicleController::publishTrajectorySetpoint(
     return false;
   }
   
-  publishOffboardControlMode();
+  // publishOffboardControlMode();
   
   px4_msgs::msg::TrajectorySetpoint msg;
   msg.position = {

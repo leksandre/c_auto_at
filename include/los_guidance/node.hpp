@@ -88,6 +88,9 @@ namespace los_guidance
     bool use_gyro_comp{false};
     bool debug{false};
 
+    // Логирование
+    int log_throttle_interval_ms{12000};
+
     // Ограничения
     double max_tilt_deg{45.0};
     double min_tilt_deg{5.0};
@@ -150,6 +153,9 @@ namespace los_guidance
     // Sync параметры
     size_t sync_buffer_size{100};
     int sync_retention_us{200000};
+
+    // Takeoff параметры
+    int takeoff_timeout_s{20};
   };
 
   /**
