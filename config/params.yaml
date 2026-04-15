@@ -3,8 +3,8 @@ los_guidance_node:
     logging:
       throttle_interval_ms: 136000
     takeoff:
-      climb_rate_mps: -0.3  # 10 м/с
-      target_altitude_m: 1.0 
+      climb_rate_mps: -3.0  # 10 м/с
+      target_altitude_m: 30.0 
       altitude_threshold_m: 1.5 
       min_altitude_already_flying_m: 2.0 
       min_cycles_for_already_flying: 20 

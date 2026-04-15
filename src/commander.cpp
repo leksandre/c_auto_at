@@ -12,10 +12,15 @@ namespace los_guidance
 
   Commander::Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
                        GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger,
-                       ArmCallback arm_cb)
+                       ArmCallback arm_cb, LandCallback land_cb, SearchRoundCallback search_cb,
+                       AltitudeCallback up_cb, AltitudeCallback down_cb,
+                       PatrolRoundCallback patrol_cb, HoldSquareCallback hold_cb)
       : port_(port), attack_callback_(std::move(attack_cb)),
         auto_mode_callback_(std::move(auto_cb)), gps_query_callback_(std::move(gps_cb)),
         home_callback_(std::move(home_cb)), arm_callback_(std::move(arm_cb)),
+        land_callback_(std::move(land_cb)), search_callback_(std::move(search_cb)),
+        up_callback_(std::move(up_cb)), down_callback_(std::move(down_cb)),
+        patrol_callback_(std::move(patrol_cb)), hold_callback_(std::move(hold_cb)),
         logger_(std::move(logger)) {}
 
   Commander::~Commander() { stop(); }
@@ -232,6 +237,132 @@ namespace los_guidance
       return;
     }
 
+    // 🆕 Команда приземления
+    if (data.find("\"land\"") != std::string::npos)
+    {
+      double speed = 0.5;  // default 0.5 m/s
+      if (parseDoubleValue(data, "land", speed))
+      {
+        RCLCPP_INFO(logger_, "🛬 Received command: land with speed %.2f m/s", speed);
+        if (land_callback_)
+          land_callback_(speed);
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"LAND\",\"data\":{\"speed\":" << speed << "}}\n";
+        sendResponse(client_fd, resp.str());
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "⚠️ Invalid land command format");
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"LAND\",\"message\":\"Invalid format, use {\\\"land\\\": N}\"}\n");
+      }
+      return;
+    }
+
+    // 🆕 Команда кругового поиска
+    if (data.find("\"search_round\"") != std::string::npos)
+    {
+      double rotation_time = 10.0;  // default 10s for 360°
+      if (parseDoubleValue(data, "search_round", rotation_time))
+      {
+        RCLCPP_INFO(logger_, "🔍 Received command: search_round with rotation time %.2f s", rotation_time);
+        if (search_callback_)
+          search_callback_(rotation_time);
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"SEARCH_ROUND\",\"data\":{\"rotation_time\":" << rotation_time << "}}\n";
+        sendResponse(client_fd, resp.str());
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "⚠️ Invalid search_round command format");
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"SEARCH_ROUND\",\"message\":\"Invalid format, use {\\\"search_round\\\": N}\"}\n");
+      }
+      return;
+    }
+
+    // 🆕 Команда подъёма
+    if (data.find("\"up_to\"") != std::string::npos)
+    {
+      double altitude = 10.0;
+      if (parseDoubleValue(data, "up_to", altitude))
+      {
+        RCLCPP_INFO(logger_, "⬆️ Received command: up_to %.2f m", altitude);
+        if (up_callback_)
+          up_callback_(altitude);
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"UP_TO\",\"data\":{\"altitude\":" << altitude << "}}\n";
+        sendResponse(client_fd, resp.str());
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "⚠️ Invalid up_to command format");
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"UP_TO\",\"message\":\"Invalid format, use {\\\"up_to\\\": N}\"}\n");
+      }
+      return;
+    }
+
+    // 🆕 Команда снижения
+    if (data.find("\"down_to\"") != std::string::npos)
+    {
+      double altitude = 10.0;
+      if (parseDoubleValue(data, "down_to", altitude))
+      {
+        RCLCPP_INFO(logger_, "⬇️ Received command: down_to %.2f m", altitude);
+        if (down_callback_)
+          down_callback_(altitude);
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"DOWN_TO\",\"data\":{\"altitude\":" << altitude << "}}\n";
+        sendResponse(client_fd, resp.str());
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "⚠️ Invalid down_to command format");
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"DOWN_TO\",\"message\":\"Invalid format, use {\\\"down_to\\\": N}\"}\n");
+      }
+      return;
+    }
+
+    // 🆕 Команда кругового патрулирования
+    if (data.find("\"patrol_round\"") != std::string::npos)
+    {
+      double diameter = 50.0;
+      if (parseDoubleValue(data, "patrol_round", diameter))
+      {
+        RCLCPP_INFO(logger_, "🔄 Received command: patrol_round with diameter %.2f m", diameter);
+        if (patrol_callback_)
+          patrol_callback_(diameter);
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"PATROL_ROUND\",\"data\":{\"diameter\":" << diameter << "}}\n";
+        sendResponse(client_fd, resp.str());
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "⚠️ Invalid patrol_round command format");
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"PATROL_ROUND\",\"message\":\"Invalid format, use {\\\"patrol_round\\\": N}\"}\n");
+      }
+      return;
+    }
+
+    // 🆕 Команда удержания позиции в квадрате
+    if (data.find("\"hold_to_square\"") != std::string::npos)
+    {
+      double square_size = 10.0;
+      if (parseDoubleValue(data, "hold_to_square", square_size))
+      {
+        RCLCPP_INFO(logger_, "⏸️ Received command: hold_to_square with size %.2f m", square_size);
+        if (hold_callback_)
+          hold_callback_(square_size);
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"HOLD_TO_SQUARE\",\"data\":{\"size\":" << square_size << "}}\n";
+        sendResponse(client_fd, resp.str());
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "⚠️ Invalid hold_to_square command format");
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"HOLD_TO_SQUARE\",\"message\":\"Invalid format, use {\\\"hold_to_square\\\": N}\"}\n");
+      }
+      return;
+    }
+
     // 3. Обычная команда атаки
     bool attack_cmd = false;
     if (parseAttackCommand(data, attack_cmd))
@@ -269,6 +400,37 @@ namespace los_guidance
       return true;
     }
     return false;
+  }
+
+  // 🆕 Универсальный метод парсинга double значения по ключу
+  bool Commander::parseDoubleValue(const std::string &data, const std::string &key, double &result)
+  {
+    size_t key_pos = data.find("\"" + key + "\"");
+    if (key_pos == std::string::npos)
+      return false;
+    
+    size_t colon_pos = data.find(':', key_pos);
+    if (colon_pos == std::string::npos)
+      return false;
+    
+    // Извлекаем значение после ':'
+    std::string val = data.substr(colon_pos + 1);
+    val.erase(0, val.find_first_not_of(" \t\r\n"));
+    
+    // Удаляем запятую или закрывающую скобку если есть
+    size_t end_pos = val.find_first_of(",} \t\r\n");
+    if (end_pos != std::string::npos)
+      val = val.substr(0, end_pos);
+    
+    try
+    {
+      result = std::stod(val);
+      return true;
+    }
+    catch (...)
+    {
+      return false;
+    }
   }
 
 } // namespace los_guidance

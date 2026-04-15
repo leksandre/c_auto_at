@@ -377,10 +377,24 @@ namespace los_guidance
     {
       IDLE,
       GPS_APPROACH,
-      VISUAL_ATTACK, 
+      VISUAL_ATTACK,
       VISUAL_SEARCH
     };
     AutoPhase auto_phase_ = AutoPhase::IDLE;
+
+    // 🆕 Активная команда (ручное управление через TCP)
+    enum class ActiveCommand
+    {
+      NONE,
+      LAND,              // Приземление
+      SEARCH_ROUND,      // Круговой поиск цели
+      UP_TO,             // Подъём на высоту
+      DOWN_TO,           // Снижение на высоту
+      PATROL_ROUND,      // Круговое патрулирование
+      HOLD_TO_SQUARE     // Удержание позиции в квадрате
+    };
+    ActiveCommand active_command_ = ActiveCommand::NONE;
+    double active_command_param_{0.0};  // Параметр активной команды
 
     struct
     {
