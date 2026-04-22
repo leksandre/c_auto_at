@@ -211,16 +211,7 @@ namespace los_guidance
     config_.adrc_h = this->get_parameter("adrc.td_h").as_double();
     config_.adrc_n = static_cast<double>(this->get_parameter("adrc.td_n").as_int());
 
-    // === Commander параметры ===
-    this->declare_parameter("commander.enable", false);
-    this->declare_parameter("commander.port", 11472);
-    this->declare_parameter("commander.targets", std::vector<std::string>{}); // 🆕
-    this->declare_parameter("commander.target_port", 11471);                  // 🆕
-
-    commander_enabled_ = this->get_parameter("commander.enable").as_bool();
-    commander_port_ = static_cast<int>(this->get_parameter("commander.port").as_int());
-    commander_targets_ = this->get_parameter("commander.targets").as_string_array();
-    target_query_port_ = static_cast<int>(this->get_parameter("commander.target_port").as_int());
+// Commander params moved to initCommander()
 
     // === Sync параметры ===
     // this->declare_parameter("sync.buffer_size", 10А0);
@@ -306,8 +297,36 @@ namespace los_guidance
     sensor_sync_->registerSource(att_sync_key_);
     sensor_sync_->registerSource(ang_rate_sync_key_);
 
-    // === 6. Commander (сетевые команды атаки) ===
+    // === 6. Commander (extracted to initCommander()) ===
+    initCommander();
 
+    if (config_.debug)
+    {
+      sensor_sync_->setDebug(true);
+    }
+
+    RCLCPP_INFO(this->get_logger(), "Controllers initialized successfully");
+  }
+
+  void Node::initCommander()
+  {
+    RCLCPP_INFO(this->get_logger(), "Initializing Commander...");
+
+    // === Commander параметры (moved from loadParameters) ===
+    this->declare_parameter("commander.enable", false);
+    this->declare_parameter("commander.port", 11472);
+    this->declare_parameter("commander.targets", std::vector<std::string>{});
+    this->declare_parameter("commander.target_port", 11471);
+
+    commander_enabled_ = this->get_parameter("commander.enable").as_bool();
+    commander_port_ = static_cast<int>(this->get_parameter("commander.port").as_int());
+    commander_targets_ = this->get_parameter("commander.targets").as_string_array();
+    target_query_port_ = static_cast<int>(this->get_parameter("commander.target_port").as_int());
+
+    RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d | Targets: %zu",
+                commander_enabled_ ? "TRUE" : "FALSE", commander_port_, commander_targets_.size());
+
+    // === Commander instantiation (handles {"set_mode": "auto"} | nc 11472) ===
     if (commander_enabled_)
     {
       commander_ = std::make_unique<Commander>(
@@ -318,7 +337,7 @@ namespace los_guidance
             start_attack_ = start;
             RCLCPP_INFO(this->get_logger(), "🌐 Commander: start_attack_ set to %s", start ? "true" : "false");
           },
-          [this]()
+          [this]()  // ← "set_mode": "auto" calls this → executeAutoModeSequence()
           {
             std::thread(&Node::executeAutoModeSequence, this).detach();
           },
@@ -332,7 +351,7 @@ namespace los_guidance
             alt = drone_gps_.alt;
             return true;
           },
-          // 🆕 Колбэк для команды HOME
+          // 🆕 Колбэк для команды HOME/RTL
           [this]() -> Commander::HomeData
           {
             std::lock_guard<std::mutex> lock(state_mutex_);
@@ -377,35 +396,11 @@ namespace los_guidance
           // 🆕 Колбэк для команд ARM/DISARM (с прерыванием взлёта)
           [this](bool arm)
           {
-            if (arm)
+            this->sendArmCommand(arm);  // 10x reliable loop
+            if (!arm && takeoff_running_)  // DISARM abort logic
             {
-              RCLCPP_INFO(this->get_logger(), "🔑 ARM command received");
-              px4_msgs::msg::VehicleCommand cmd;
-              cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
-              cmd.param1 = 1.0f;
-              cmd.target_system = 1;
-              cmd.target_component = 1;
-              cmd.from_external = true;
-              cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-              vehicle_cmd_pub_->publish(cmd);
-            }
-            else
-            {
-              RCLCPP_INFO(this->get_logger(), "🔓 0DISARM command received");
-              // 🆕 Если взлёт активен — прерываем
-              if (takeoff_running_)
-              {
-                RCLCPP_WARN(this->get_logger(), "⚠️ 0Aborting takeoff due to DISARM");
-                takeoff_abort_ = true;
-              }
-              px4_msgs::msg::VehicleCommand cmd;
-              cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
-              cmd.param1 = 0.0f;
-              cmd.target_system = 1;
-              cmd.target_component = 1;
-              cmd.from_external = true;
-              cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-              vehicle_cmd_pub_->publish(cmd);
+              RCLCPP_WARN(this->get_logger(), "⚠️ Aborting takeoff due to DISARM");
+              takeoff_abort_ = true;
             }
           },
           // 🆕 Колбэк для приземления
@@ -476,14 +471,31 @@ namespace los_guidance
             auto_phase_ = AutoPhase::IDLE;
           });
       commander_->start();
+      RCLCPP_INFO(this->get_logger(), "✅ Commander TCP server started on port %d", commander_port_);
     }
-
-    if (config_.debug)
+    else
     {
-      sensor_sync_->setDebug(true);
+      RCLCPP_WARN(this->get_logger(), "⚠️ Commander disabled (commander.enable=false)");
     }
+  }
 
-    RCLCPP_INFO(this->get_logger(), "Controllers initialized successfully");
+  void Node::sendArmCommand(bool arm)
+  {
+    const char* action = arm ? "ARM" : "DISARM";
+    RCLCPP_INFO(this->get_logger(), "🔑 Sending %s command (10x loop)...", action);
+    for (int i = 0; i < 10; i++)
+    {
+      px4_msgs::msg::VehicleCommand cmd;
+      cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+      cmd.param1 = arm ? 1.0f : 0.0f;
+      cmd.target_system = 1;
+      cmd.target_component = 1;
+      cmd.from_external = true;
+      cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+      vehicle_cmd_pub_->publish(cmd);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    RCLCPP_INFO(this->get_logger(), "✅ %s sequence complete", action);
   }
 
   void Node::createPublishers()
@@ -1736,19 +1748,7 @@ namespace los_guidance
       start_alt = start_alt_;
 
     // 1. Arm (отправляем многократно для надёжности)
-    RCLCPP_INFO(this->get_logger(), "🔑 Sending ARM command...");
-    for (int i = 0; i < 10; i++)
-    {
-      px4_msgs::msg::VehicleCommand arm_cmd;
-      arm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
-      arm_cmd.param1 = 1.0f;
-      arm_cmd.target_system = 1;
-      arm_cmd.target_component = 1;
-      arm_cmd.from_external = true;
-      arm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-      vehicle_cmd_pub_->publish(arm_cmd);
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+    sendArmCommand(true);
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // 2. Offboard (отправляем многократно для надёжности)

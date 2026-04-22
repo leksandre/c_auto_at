@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-04-13 14:41:35
+Дата: 2026-04-22 20:20:14
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -129,7 +129,7 @@ private:
 #endif  // LOS_GUIDANCE_ADRC_HPP_
 ================================================================================
 Файл: ./include/los_guidance/commander.hpp
-Строк: 50
+Строк: 70
 ================================================================================
 
 #ifndef LOS_GUIDANCE_COMMANDER_HPP_
@@ -150,14 +150,27 @@ public:
   using AutoModeCallback = std::function<void()>;
   using GpsQueryCallback = std::function<bool(double&, double&, double&)>;
   using ArmCallback = std::function<void(bool)>;  // 🆕 true=arm, false=disarm
-  
+
   // 🆕 Домашняя точка
   struct HomeData { double lat{0}, lon{0}, alt{0}; bool valid{false}; };
   using HomeCallback = std::function<HomeData()>;
 
+  // 🆕 Callback'и для новых команд
+  using LandCallback = std::function<void(double)>;              // land speed (m/s)
+  using SearchRoundCallback = std::function<void(double)>;       // search rotation time (s for 360°)
+  using AltitudeCallback = std::function<void(double)>;          // altitude change (m)
+  using PatrolRoundCallback = std::function<void(double)>;       // patrol diameter (m)
+  using HoldSquareCallback = std::function<void(double)>;        // hold square size (m)
+
   explicit Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
                      GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger,
-                     ArmCallback arm_cb = nullptr);  // 🆕
+                     ArmCallback arm_cb = nullptr,                            // 🆕
+                     LandCallback land_cb = nullptr,                          // 🆕
+                     SearchRoundCallback search_cb = nullptr,                 // 🆕
+                     AltitudeCallback up_cb = nullptr,                        // 🆕
+                     AltitudeCallback down_cb = nullptr,                      // 🆕
+                     PatrolRoundCallback patrol_cb = nullptr,                 // 🆕
+                     HoldSquareCallback hold_cb = nullptr);                   // 🆕
   ~Commander();
 
   void start();
@@ -168,6 +181,7 @@ private:
   void handleConnection(int client_fd);
   void processCommand(const std::string &data, int client_fd);
   bool parseAttackCommand(const std::string &data, bool &result);
+  bool parseDoubleValue(const std::string &data, const std::string &key, double &result);  // 🆕
   void sendResponse(int fd, const std::string &json);
 
   int port_;
@@ -176,6 +190,12 @@ private:
   GpsQueryCallback gps_query_callback_;
   HomeCallback home_callback_; // 🆕
   ArmCallback arm_callback_;   // 🆕
+  LandCallback land_callback_;         // 🆕
+  SearchRoundCallback search_callback_; // 🆕
+  AltitudeCallback up_callback_;       // 🆕
+  AltitudeCallback down_callback_;     // 🆕
+  PatrolRoundCallback patrol_callback_; // 🆕
+  HoldSquareCallback hold_callback_;   // 🆕
   rclcpp::Logger logger_;
   std::thread listen_thread_;
   std::atomic<bool> running_{false};
@@ -930,7 +950,7 @@ private:
 #endif // LOS_GUIDANCE_LOS_ESTIMATOR_HPP_
 ================================================================================
 Файл: ./include/los_guidance/node.hpp
-Строк: 448
+Строк: 468
 ================================================================================
 
 /**
@@ -1221,6 +1241,12 @@ namespace los_guidance
         const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
         std::shared_ptr<std_srvs::srv::Trigger::Response> response);
 
+    /**
+     * @brief Initialize Commander TCP server (port 11472)
+     * @note Extracted for reusability/restart capability
+     */
+    void initCommander();
+
     // === Timer Callbacks ===
     /**
      * @brief Основной цикл управления (вызывается по таймеру)
@@ -1312,10 +1338,24 @@ namespace los_guidance
     {
       IDLE,
       GPS_APPROACH,
-      VISUAL_ATTACK, 
+      VISUAL_ATTACK,
       VISUAL_SEARCH
     };
     AutoPhase auto_phase_ = AutoPhase::IDLE;
+
+    // 🆕 Активная команда (ручное управление через TCP)
+    enum class ActiveCommand
+    {
+      NONE,
+      LAND,              // Приземление
+      SEARCH_ROUND,      // Круговой поиск цели
+      UP_TO,             // Подъём на высоту
+      DOWN_TO,           // Снижение на высоту
+      PATROL_ROUND,      // Круговое патрулирование
+      HOLD_TO_SQUARE     // Удержание позиции в квадрате
+    };
+    ActiveCommand active_command_ = ActiveCommand::NONE;
+    double active_command_param_{0.0};  // Параметр активной команды
 
     struct
     {
@@ -2107,7 +2147,7 @@ private:
 
 ================================================================================
 Файл: ./src/commander.cpp
-Строк: 273
+Строк: 435
 ================================================================================
 
 #include "los_guidance/commander.hpp"
@@ -2124,10 +2164,15 @@ namespace los_guidance
 
   Commander::Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
                        GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger,
-                       ArmCallback arm_cb)
+                       ArmCallback arm_cb, LandCallback land_cb, SearchRoundCallback search_cb,
+                       AltitudeCallback up_cb, AltitudeCallback down_cb,
+                       PatrolRoundCallback patrol_cb, HoldSquareCallback hold_cb)
       : port_(port), attack_callback_(std::move(attack_cb)),
         auto_mode_callback_(std::move(auto_cb)), gps_query_callback_(std::move(gps_cb)),
         home_callback_(std::move(home_cb)), arm_callback_(std::move(arm_cb)),
+        land_callback_(std::move(land_cb)), search_callback_(std::move(search_cb)),
+        up_callback_(std::move(up_cb)), down_callback_(std::move(down_cb)),
+        patrol_callback_(std::move(patrol_cb)), hold_callback_(std::move(hold_cb)),
         logger_(std::move(logger)) {}
 
   Commander::~Commander() { stop(); }
@@ -2344,6 +2389,132 @@ namespace los_guidance
       return;
     }
 
+    // 🆕 Команда приземления
+    if (data.find("\"land\"") != std::string::npos)
+    {
+      double speed = 0.5;  // default 0.5 m/s
+      if (parseDoubleValue(data, "land", speed))
+      {
+        RCLCPP_INFO(logger_, "🛬 Received command: land with speed %.2f m/s", speed);
+        if (land_callback_)
+          land_callback_(speed);
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"LAND\",\"data\":{\"speed\":" << speed << "}}\n";
+        sendResponse(client_fd, resp.str());
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "⚠️ Invalid land command format");
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"LAND\",\"message\":\"Invalid format, use {\\\"land\\\": N}\"}\n");
+      }
+      return;
+    }
+
+    // 🆕 Команда кругового поиска
+    if (data.find("\"search_round\"") != std::string::npos)
+    {
+      double rotation_time = 10.0;  // default 10s for 360°
+      if (parseDoubleValue(data, "search_round", rotation_time))
+      {
+        RCLCPP_INFO(logger_, "🔍 Received command: search_round with rotation time %.2f s", rotation_time);
+        if (search_callback_)
+          search_callback_(rotation_time);
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"SEARCH_ROUND\",\"data\":{\"rotation_time\":" << rotation_time << "}}\n";
+        sendResponse(client_fd, resp.str());
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "⚠️ Invalid search_round command format");
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"SEARCH_ROUND\",\"message\":\"Invalid format, use {\\\"search_round\\\": N}\"}\n");
+      }
+      return;
+    }
+
+    // 🆕 Команда подъёма
+    if (data.find("\"up_to\"") != std::string::npos)
+    {
+      double altitude = 10.0;
+      if (parseDoubleValue(data, "up_to", altitude))
+      {
+        RCLCPP_INFO(logger_, "⬆️ Received command: up_to %.2f m", altitude);
+        if (up_callback_)
+          up_callback_(altitude);
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"UP_TO\",\"data\":{\"altitude\":" << altitude << "}}\n";
+        sendResponse(client_fd, resp.str());
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "⚠️ Invalid up_to command format");
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"UP_TO\",\"message\":\"Invalid format, use {\\\"up_to\\\": N}\"}\n");
+      }
+      return;
+    }
+
+    // 🆕 Команда снижения
+    if (data.find("\"down_to\"") != std::string::npos)
+    {
+      double altitude = 10.0;
+      if (parseDoubleValue(data, "down_to", altitude))
+      {
+        RCLCPP_INFO(logger_, "⬇️ Received command: down_to %.2f m", altitude);
+        if (down_callback_)
+          down_callback_(altitude);
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"DOWN_TO\",\"data\":{\"altitude\":" << altitude << "}}\n";
+        sendResponse(client_fd, resp.str());
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "⚠️ Invalid down_to command format");
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"DOWN_TO\",\"message\":\"Invalid format, use {\\\"down_to\\\": N}\"}\n");
+      }
+      return;
+    }
+
+    // 🆕 Команда кругового патрулирования
+    if (data.find("\"patrol_round\"") != std::string::npos)
+    {
+      double diameter = 50.0;
+      if (parseDoubleValue(data, "patrol_round", diameter))
+      {
+        RCLCPP_INFO(logger_, "🔄 Received command: patrol_round with diameter %.2f m", diameter);
+        if (patrol_callback_)
+          patrol_callback_(diameter);
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"PATROL_ROUND\",\"data\":{\"diameter\":" << diameter << "}}\n";
+        sendResponse(client_fd, resp.str());
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "⚠️ Invalid patrol_round command format");
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"PATROL_ROUND\",\"message\":\"Invalid format, use {\\\"patrol_round\\\": N}\"}\n");
+      }
+      return;
+    }
+
+    // 🆕 Команда удержания позиции в квадрате
+    if (data.find("\"hold_to_square\"") != std::string::npos)
+    {
+      double square_size = 10.0;
+      if (parseDoubleValue(data, "hold_to_square", square_size))
+      {
+        RCLCPP_INFO(logger_, "⏸️ Received command: hold_to_square with size %.2f m", square_size);
+        if (hold_callback_)
+          hold_callback_(square_size);
+        std::ostringstream resp;
+        resp << "{\"status\":\"success\",\"command\":\"HOLD_TO_SQUARE\",\"data\":{\"size\":" << square_size << "}}\n";
+        sendResponse(client_fd, resp.str());
+      }
+      else
+      {
+        RCLCPP_WARN(logger_, "⚠️ Invalid hold_to_square command format");
+        sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"HOLD_TO_SQUARE\",\"message\":\"Invalid format, use {\\\"hold_to_square\\\": N}\"}\n");
+      }
+      return;
+    }
+
     // 3. Обычная команда атаки
     bool attack_cmd = false;
     if (parseAttackCommand(data, attack_cmd))
@@ -2381,6 +2552,37 @@ namespace los_guidance
       return true;
     }
     return false;
+  }
+
+  // 🆕 Универсальный метод парсинга double значения по ключу
+  bool Commander::parseDoubleValue(const std::string &data, const std::string &key, double &result)
+  {
+    size_t key_pos = data.find("\"" + key + "\"");
+    if (key_pos == std::string::npos)
+      return false;
+    
+    size_t colon_pos = data.find(':', key_pos);
+    if (colon_pos == std::string::npos)
+      return false;
+    
+    // Извлекаем значение после ':'
+    std::string val = data.substr(colon_pos + 1);
+    val.erase(0, val.find_first_not_of(" \t\r\n"));
+    
+    // Удаляем запятую или закрывающую скобку если есть
+    size_t end_pos = val.find_first_of(",} \t\r\n");
+    if (end_pos != std::string::npos)
+      val = val.substr(0, end_pos);
+    
+    try
+    {
+      result = std::stod(val);
+      return true;
+    }
+    catch (...)
+    {
+      return false;
+    }
   }
 
 } // namespace los_guidance
@@ -3378,7 +3580,7 @@ int main(int argc, char **argv) {
 }
 ================================================================================
 Файл: ./src/node.cpp
-Строк: 1945
+Строк: 2241
 ================================================================================
 
 /**
@@ -3594,16 +3796,7 @@ namespace los_guidance
     config_.adrc_h = this->get_parameter("adrc.td_h").as_double();
     config_.adrc_n = static_cast<double>(this->get_parameter("adrc.td_n").as_int());
 
-    // === Commander параметры ===
-    this->declare_parameter("commander.enable", false);
-    this->declare_parameter("commander.port", 11472);
-    this->declare_parameter("commander.targets", std::vector<std::string>{}); // 🆕
-    this->declare_parameter("commander.target_port", 11471);                  // 🆕
-
-    commander_enabled_ = this->get_parameter("commander.enable").as_bool();
-    commander_port_ = static_cast<int>(this->get_parameter("commander.port").as_int());
-    commander_targets_ = this->get_parameter("commander.targets").as_string_array();
-    target_query_port_ = static_cast<int>(this->get_parameter("commander.target_port").as_int());
+// Commander params moved to initCommander()
 
     // === Sync параметры ===
     // this->declare_parameter("sync.buffer_size", 10А0);
@@ -3689,8 +3882,36 @@ namespace los_guidance
     sensor_sync_->registerSource(att_sync_key_);
     sensor_sync_->registerSource(ang_rate_sync_key_);
 
-    // === 6. Commander (сетевые команды атаки) ===
+    // === 6. Commander (extracted to initCommander()) ===
+    initCommander();
 
+    if (config_.debug)
+    {
+      sensor_sync_->setDebug(true);
+    }
+
+    RCLCPP_INFO(this->get_logger(), "Controllers initialized successfully");
+  }
+
+  void Node::initCommander()
+  {
+    RCLCPP_INFO(this->get_logger(), "Initializing Commander...");
+
+    // === Commander параметры (moved from loadParameters) ===
+    this->declare_parameter("commander.enable", false);
+    this->declare_parameter("commander.port", 11472);
+    this->declare_parameter("commander.targets", std::vector<std::string>{});
+    this->declare_parameter("commander.target_port", 11471);
+
+    commander_enabled_ = this->get_parameter("commander.enable").as_bool();
+    commander_port_ = static_cast<int>(this->get_parameter("commander.port").as_int());
+    commander_targets_ = this->get_parameter("commander.targets").as_string_array();
+    target_query_port_ = static_cast<int>(this->get_parameter("commander.target_port").as_int());
+
+    RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d | Targets: %zu",
+                commander_enabled_ ? "TRUE" : "FALSE", commander_port_, commander_targets_.size());
+
+    // === Commander instantiation (handles {"set_mode": "auto"} | nc 11472) ===
     if (commander_enabled_)
     {
       commander_ = std::make_unique<Commander>(
@@ -3701,7 +3922,7 @@ namespace los_guidance
             start_attack_ = start;
             RCLCPP_INFO(this->get_logger(), "🌐 Commander: start_attack_ set to %s", start ? "true" : "false");
           },
-          [this]()
+          [this]()  // ← "set_mode": "auto" calls this → executeAutoModeSequence()
           {
             std::thread(&Node::executeAutoModeSequence, this).detach();
           },
@@ -3715,7 +3936,7 @@ namespace los_guidance
             alt = drone_gps_.alt;
             return true;
           },
-          // 🆕 Колбэк для команды HOME
+          // 🆕 Колбэк для команды HOME/RTL
           [this]() -> Commander::HomeData
           {
             std::lock_guard<std::mutex> lock(state_mutex_);
@@ -3774,11 +3995,11 @@ namespace los_guidance
             }
             else
             {
-              RCLCPP_INFO(this->get_logger(), "🔓 0DISARM command received");
+              RCLCPP_INFO(this->get_logger(), "🔓 DISARM command received");
               // 🆕 Если взлёт активен — прерываем
               if (takeoff_running_)
               {
-                RCLCPP_WARN(this->get_logger(), "⚠️ 0Aborting takeoff due to DISARM");
+                RCLCPP_WARN(this->get_logger(), "⚠️ Aborting takeoff due to DISARM");
                 takeoff_abort_ = true;
               }
               px4_msgs::msg::VehicleCommand cmd;
@@ -3790,16 +4011,81 @@ namespace los_guidance
               cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
               vehicle_cmd_pub_->publish(cmd);
             }
+          },
+          // 🆕 Колбэк для приземления
+          [this](double speed)
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            RCLCPP_INFO(this->get_logger(), "🛬 LAND command received, speed: %.2f m/s", speed);
+            active_command_ = ActiveCommand::LAND;
+            active_command_param_ = speed;
+            // Прерываем атаку и авто режим
+            start_attack_ = false;
+            attack_enabled_ = false;
+            auto_phase_ = AutoPhase::IDLE;
+          },
+          // 🆕 Колбэк для кругового поиска
+          [this](double rotation_time)
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            RCLCPP_INFO(this->get_logger(), "🔍 SEARCH_ROUND command, rotation time: %.2f s", rotation_time);
+            active_command_ = ActiveCommand::SEARCH_ROUND;
+            active_command_param_ = rotation_time;
+            start_attack_ = false;
+            attack_enabled_ = false;
+            auto_phase_ = AutoPhase::IDLE;
+          },
+          // 🆕 Колбэк для подъёма
+          [this](double altitude)
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            RCLCPP_INFO(this->get_logger(), "⬆️ UP_TO command, altitude: %.2f m", altitude);
+            active_command_ = ActiveCommand::UP_TO;
+            active_command_param_ = altitude;
+            start_attack_ = false;
+            attack_enabled_ = false;
+            auto_phase_ = AutoPhase::IDLE;
+          },
+          // 🆕 Колбэк для снижения
+          [this](double altitude)
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            RCLCPP_INFO(this->get_logger(), "⬇️ DOWN_TO command, altitude: %.2f m", altitude);
+            active_command_ = ActiveCommand::DOWN_TO;
+            active_command_param_ = altitude;
+            start_attack_ = false;
+            attack_enabled_ = false;
+            auto_phase_ = AutoPhase::IDLE;
+          },
+          // 🆕 Колбэк для кругового патрулирования
+          [this](double diameter)
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            RCLCPP_INFO(this->get_logger(), "🔄 PATROL_ROUND command, diameter: %.2f m", diameter);
+            active_command_ = ActiveCommand::PATROL_ROUND;
+            active_command_param_ = diameter;
+            start_attack_ = false;
+            attack_enabled_ = false;
+            auto_phase_ = AutoPhase::IDLE;
+          },
+          // 🆕 Колбэк для удержания позиции в квадрате
+          [this](double square_size)
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            RCLCPP_INFO(this->get_logger(), "⏸️ HOLD_TO_SQUARE command, size: %.2f m", square_size);
+            active_command_ = ActiveCommand::HOLD_TO_SQUARE;
+            active_command_param_ = square_size;
+            start_attack_ = false;
+            attack_enabled_ = false;
+            auto_phase_ = AutoPhase::IDLE;
           });
       commander_->start();
+      RCLCPP_INFO(this->get_logger(), "✅ Commander TCP server started on port %d", commander_port_);
     }
-
-    if (config_.debug)
+    else
     {
-      sensor_sync_->setDebug(true);
+      RCLCPP_WARN(this->get_logger(), "⚠️ Commander disabled (commander.enable=false)");
     }
-
-    RCLCPP_INFO(this->get_logger(), "Controllers initialized successfully");
   }
 
   void Node::createPublishers()
@@ -4362,7 +4648,7 @@ namespace los_guidance
       return;
     }
 
-    vehicle_ctrl_->publishOffboardControlMode();
+    // vehicle_ctrl_->publishOffboardControlMode();
     std::unique_lock<std::mutex> lock(state_mutex_); // блять блочит весь цикл...
 
     // === ФАЗА 1: СБЛИЖЕНИЕ ПО GPS ===
@@ -4538,14 +4824,6 @@ namespace los_guidance
             update_acc_setpoint_ = true;
             vehicle_ctrl_->publishOffboardControlMode();
             vehicle_ctrl_->publishAccelerationSetpoint(acc_cmd);
-
-                            // 🟢 Отладка без throttle (только для тестов)
-                static int tick_cnt = 0;
-                if (++tick_cnt % 20 == 0) { // ~ каждые 0.5 сек
-                    RCLCPP_INFO(this->get_logger(), 
-                        "🔍 TIMER: phase=%d, ready=%d, should_attack=%d, mode=%d",
-                        (int)auto_phase_, 1, 1, (int)vehicle_ctrl_->getCurrentMode());
-                }
           }
           else
           {
@@ -4584,6 +4862,226 @@ namespace los_guidance
     // if (!attack_ready_)
     //   return;
     bool should_attack = (start_attack_ || attack_enabled_);
+    
+    // 🆕 ПРОВЕРКА: Если есть активная команда - выполняем её (приоритет над атакой!)
+    if (active_command_ != ActiveCommand::NONE)
+    {
+      // 🆕 Активная команда прерывает даже атаку!
+      should_attack = false;  // Принудительно отключаем атаку
+      
+      switch (active_command_)
+      {
+        case ActiveCommand::LAND:
+        {
+          // Приземление со скоростью N м/с
+          double land_speed = active_command_param_;
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                               "🛬 LANDING with speed: %.2f m/s", land_speed);
+          
+          // Отправляем команду посадки через PX4
+          px4_msgs::msg::VehicleCommand cmd;
+          cmd.command = 21; // MAV_CMD_NAV_LAND
+          cmd.param7 = static_cast<float>(land_speed);  // Скорость снижения
+          cmd.target_system = 1;
+          cmd.target_component = 1;
+          cmd.from_external = true;
+          cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+          vehicle_cmd_pub_->publish(cmd);
+          
+          // Если высота < 5м, плавно снижаем скорость
+          if (drone_gps_.is_valid)
+          {
+            double current_alt = drone_gps_.alt;
+            if (current_alt < 5.0)
+            {
+              // Плавно снижаем скорость от land_speed до 0.1 м/с
+              double smooth_speed = land_speed * (current_alt / 5.0);
+              smooth_speed = std::max(0.1, smooth_speed);
+              cmd.param7 = static_cast<float>(smooth_speed);
+              vehicle_cmd_pub_->publish(cmd);
+            }
+          }
+          break;
+        }
+        
+        case ActiveCommand::SEARCH_ROUND:
+        {
+          // Круговой поиск цели - вращение вокруг оси Z
+          double rotation_time = active_command_param_;  // время на 360°
+          double yaw_rate = (2.0 * M_PI) / rotation_time;  // rad/s
+          
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                               "🔍 SEARCH_ROUND with yaw_rate: %.2f deg/s", yaw_rate * 180.0 / M_PI);
+          
+          // Устанавливаем offboard режим и публикуем yaw_rate
+          if (vehicle_ctrl_->getCurrentMode() != FlightMode::OFFBOARD)
+          {
+            vehicle_ctrl_->setOffboardMode();
+          }
+          
+          px4_msgs::msg::TrajectorySetpoint msg;
+          msg.position = {NAN, NAN, NAN};
+          msg.velocity = {NAN, NAN, NAN};
+          msg.acceleration = {NAN, NAN, NAN};
+          msg.yaw = NAN;
+          msg.yawspeed = static_cast<float>(yaw_rate);
+          msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+          trajectory_setpoint_pub_->publish(msg);
+          break;
+        }
+        
+        case ActiveCommand::UP_TO:
+        {
+          // Подъём на N метров
+          double target_altitude = active_command_param_;
+          
+          if (drone_gps_.is_valid)
+          {
+            double current_alt = drone_gps_.alt;
+            double altitude_diff = target_altitude - current_alt;
+            
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                                 "⬆️ UP_TO: current=%.1f, target=%.1f, diff=%.1f",
+                                 current_alt, target_altitude, altitude_diff);
+            
+            // Если ещё нужно подняться
+            if (altitude_diff > 0.5)
+            {
+              // Устанавливаем вертикальную скорость вверх
+              px4_msgs::msg::TrajectorySetpoint msg;
+              msg.position = {NAN, NAN, NAN};
+              msg.velocity = {0.0f, 0.0f, -2.0f};  // NED: negative = up
+              msg.acceleration = {NAN, NAN, NAN};
+              msg.yaw = NAN;
+              msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+              trajectory_setpoint_pub_->publish(msg);
+            }
+            else
+            {
+              // Достигли цели - стабилизируем позицию
+              RCLCPP_INFO(this->get_logger(), "✅ UP_TO target reached");
+              active_command_ = ActiveCommand::NONE;
+            }
+          }
+          break;
+        }
+        
+        case ActiveCommand::DOWN_TO:
+        {
+          // Снижение на N метров
+          double target_altitude = active_command_param_;
+          
+          if (drone_gps_.is_valid)
+          {
+            double current_alt = drone_gps_.alt;
+            double altitude_diff = current_alt - target_altitude;
+            
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                                 "⬇️ DOWN_TO: current=%.1f, target=%.1f, diff=%.1f",
+                                 current_alt, target_altitude, altitude_diff);
+            
+            // Если ещё нужно снизиться
+            if (altitude_diff > 0.5)
+            {
+              // Устанавливаем вертикальную скорость вниз
+              px4_msgs::msg::TrajectorySetpoint msg;
+              msg.position = {NAN, NAN, NAN};
+              msg.velocity = {0.0f, 0.0f, 1.0f};  // NED: positive = down
+              msg.acceleration = {NAN, NAN, NAN};
+              msg.yaw = NAN;
+              msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+              trajectory_setpoint_pub_->publish(msg);
+            }
+            else
+            {
+              // Достигли цели - стабилизируем позицию
+              RCLCPP_INFO(this->get_logger(), "✅ DOWN_TO target reached");
+              active_command_ = ActiveCommand::NONE;
+            }
+          }
+          break;
+        }
+        
+        case ActiveCommand::PATROL_ROUND:
+        {
+          // Движение по окружности диаметром N метров
+          double diameter = active_command_param_;
+          double radius = diameter / 2.0;
+          
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                               "🔄 PATROL_ROUND with diameter: %.1f m", diameter);
+          
+          // Вычисляем позицию на окружности на основе времени
+          auto now = this->get_clock()->now();
+          double time_sec = now.seconds();
+          double angular_speed = 0.5;  // rad/s (можно настроить)
+          double angle = fmod(time_sec * angular_speed, 2.0 * M_PI);
+          
+          if (drone_gps_.is_valid)
+          {
+            // Текущая позиция - центр окружности
+            double center_lat = drone_gps_.lat;
+            double center_lon = drone_gps_.lon;
+            
+            // Позиция на окружности
+            double target_lat = center_lat + (radius * std::cos(angle)) / 111320.0;  // Convert m to deg
+            double target_lon = center_lon + (radius * std::sin(angle)) / (111320.0 * std::cos(center_lat * M_PI / 180.0));
+            
+            // Конвертируем в NED
+            Eigen::Vector3d target_pos = gpsToNed(target_lat, target_lon, drone_gps_.alt,
+                                                   ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+            
+            // Публикуем позицию
+            if (!ref_gps_valid_)
+            {
+              ref_gps_.lat = drone_gps_.lat;
+              ref_gps_.lon = drone_gps_.lon;
+              ref_gps_.alt = drone_gps_.alt;
+              ref_gps_valid_ = true;
+            }
+            
+            vehicle_ctrl_->publishPositionSetpoint(target_pos);
+          }
+          break;
+        }
+        
+        case ActiveCommand::HOLD_TO_SQUARE:
+        {
+          // Удержание позиции в квадрате NxNxN метров
+          double square_size = active_command_param_;
+          
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                               "⏸️ HOLD_TO_SQUARE: %.1f m", square_size);
+          
+          if (drone_gps_.is_valid)
+          {
+            // Квадрат: дрейф в пределах square_size метров от начальной точки
+            // Используем текущую позицию как центр удержания
+            if (!ref_gps_valid_)
+            {
+              ref_gps_.lat = drone_gps_.lat;
+              ref_gps_.lon = drone_gps_.lon;
+              ref_gps_.alt = drone_gps_.alt;
+              ref_gps_valid_ = true;
+            }
+            
+            // Удержание текущей позиции (hover)
+            Eigen::Vector3d hover_ned = gpsToNed(drone_gps_.lat, drone_gps_.lon, drone_gps_.alt,
+                                                  ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+            vehicle_ctrl_->publishPositionSetpoint(hover_ned);
+          }
+          break;
+        }
+        
+        case ActiveCommand::NONE:
+        default:
+          break;
+      }
+      
+      // После выполнения команды НЕ выходим из callback, 
+      // чтобы ниже могла сработать логика атаки если нужно
+    }
+    
     if (should_attack)
     {
       if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD)
@@ -4866,7 +5364,7 @@ namespace los_guidance
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // 3. Takeoff — читаем параметры из YAML
-    this->declare_parameter("takeoff.target_altitude_m", 1.0);
+    this->declare_parameter("takeoff.target_altitude_m", 31.0);
     this->declare_parameter("takeoff.climb_rate_mps", -3.0);
     this->declare_parameter("takeoff.altitude_threshold_m", 1.5);
     this->declare_parameter("takeoff.min_altitude_already_flying_m", 2.0);
@@ -5269,7 +5767,7 @@ namespace los_guidance
         // Цель найдена камерой — переходим в атаку
         std::lock_guard<std::mutex> lock(state_mutex_);
         auto_phase_ = AutoPhase::VISUAL_ATTACK;
-        start_attack_ = true;
+        start_attack_ = true; // если будешь включать по команде - закомменти 
         attack_enabled_ = true;
         RCLCPP_INFO(this->get_logger(), "🚀 Switching to VISUAL ATTACK mode!");
         return;
@@ -6013,7 +6511,7 @@ bool VehicleController::publishAccelerationSetpoint(
   acc_smooth = clampAcceleration_(acc_smooth);
   
   // Публикация offboard control mode (должна публиковаться регулярно)
-  publishOffboardControlMode();
+  // publishOffboardControlMode();
   
   // Публикация trajectory setpoint
   px4_msgs::msg::TrajectorySetpoint msg;
@@ -6054,7 +6552,7 @@ bool VehicleController::publishVelocitySetpoint(
     return false;
   }
   
-  publishOffboardControlMode();
+  // publishOffboardControlMode();
   
   px4_msgs::msg::TrajectorySetpoint msg;
   msg.position = {NAN, NAN, NAN};
@@ -6085,7 +6583,7 @@ bool VehicleController::publishPositionSetpoint(
     return false;
   }
   
-  publishOffboardControlMode();
+  // publishOffboardControlMode();
   
   px4_msgs::msg::TrajectorySetpoint msg;
   msg.position = {
@@ -6133,7 +6631,7 @@ bool VehicleController::publishTrajectorySetpoint(
     return false;
   }
   
-  publishOffboardControlMode();
+  // publishOffboardControlMode();
   
   px4_msgs::msg::TrajectorySetpoint msg;
   msg.position = {
@@ -6406,8 +6904,8 @@ los_guidance_node:
     logging:
       throttle_interval_ms: 136000
     takeoff:
-      climb_rate_mps: -0.3  # 10 м/с
-      target_altitude_m: 1.0 
+      climb_rate_mps: -3.0  # 10 м/с
+      target_altitude_m: 30.0 
       altitude_threshold_m: 1.5 
       min_altitude_already_flying_m: 2.0 
       min_cycles_for_already_flying: 20 
@@ -6672,5 +7170,5 @@ def generate_launch_description():
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 6515
+Всего строк: 7013
 ================================================================================

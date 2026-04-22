@@ -286,6 +286,19 @@ namespace los_guidance
         const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
         std::shared_ptr<std_srvs::srv::Trigger::Response> response);
 
+    /**
+     * @brief Initialize Commander TCP server (port 11472)
+     * @note Extracted for reusability/restart capability
+     */
+    void initCommander();
+
+    /**
+     * @brief Send ARM/DISARM command (10x loop for reliability)
+     * @param arm true=ARM, false=DISARM
+     */
+    void sendArmCommand(bool arm);
+
+
     // === Timer Callbacks ===
     /**
      * @brief Основной цикл управления (вызывается по таймеру)
