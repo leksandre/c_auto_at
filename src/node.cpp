@@ -221,6 +221,17 @@ namespace los_guidance
     config_.sync_buffer_size = this->get_parameter("sync.buffer_size").as_int();
     config_.sync_retention_us = this->get_parameter("sync.retention_us").as_int();
 
+  // === Search mode params ===
+
+  this->declare_parameter("search.kp_yaw_track", 0.5);
+
+  config_.kp_yaw_track = this->get_parameter("search.kp_yaw_track").as_double();
+
+  // === Search mode params ===
+
+
+  config_.kp_yaw_track = this->get_parameter("search.kp_yaw_track").as_double();
+
     RCLCPP_INFO(this->get_logger(), "Parameters loaded successfully");
     commander_enabled_ = this->get_parameter("commander.enable").as_bool();
     RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
@@ -751,6 +762,7 @@ namespace los_guidance
                              target.is_valid ? 1 : 0);
       }
 
+    last_los_cam_y_.store(target.los_cam.y(), std::memory_order_relaxed);  // 🆕
       if (target.is_valid)
       {
         // RCLCPP_INFO(this->get_logger(),
@@ -1184,6 +1196,39 @@ namespace los_guidance
     }
 
     // === ФАЗА 2: ВИЗУАЛЬНАЯ АТАКА (LOS Guidance) ===
+
+// === ФАЗА 2.5: ВИЗУАЛЬНЫЙ ПОИСК (Yaw Tracking + Hover) ===
+if (auto_phase_ == AutoPhase::VISUAL_SEARCH)
+{
+    vehicle_ctrl_->publishOffboardControlMode();
+    bool target_seen = attack_ready_.load(std::memory_order_acquire);
+
+    if (target_seen && start_attack_) {
+        auto_phase_ = AutoPhase::VISUAL_ATTACK;
+        RCLCPP_INFO(this->get_logger(), "🚀 Switching from SEARCH to VISUAL ATTACK");
+    } else {
+        double yaw_rate_cmd = 0.0;
+        if (target_seen) {
+            yaw_rate_cmd = -config_.kp_yaw_track * last_los_cam_y_.load(std::memory_order_relaxed);
+            double max_yaw_rate = 30.0 * DEG2RAD;
+            yaw_rate_cmd = std::clamp(yaw_rate_cmd, -max_yaw_rate, max_yaw_rate);
+        }
+
+        px4_msgs::msg::TrajectorySetpoint msg;
+        msg.position = {NAN, NAN, NAN};
+        msg.velocity = {NAN, NAN, NAN};
+        msg.acceleration = {NAN, NAN, NAN};
+        msg.yaw = NAN;
+        msg.yawspeed = static_cast<float>(yaw_rate_cmd);
+        msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        trajectory_setpoint_pub_->publish(msg);
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "🔍 SEARCH: yaw_rate=%.1f deg/s, target=%s",
+                             yaw_rate_cmd * 180.0 / M_PI, target_seen ? "LOCKED" : "SCANNING");
+        return;
+    }
+}
+
 
     if (auto_phase_ == AutoPhase::VISUAL_ATTACK)
     {
@@ -2220,5 +2265,27 @@ namespace los_guidance
     alt = drone_gps_.alt;
     return true;
   }
+
+
+void Node::executeSearchMode()
+{
+    RCLCPP_INFO(this->get_logger(), "🔍 Starting SEARCH mode...");
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    auto_phase_ = AutoPhase::VISUAL_SEARCH;
+    start_attack_ = false;
+    attack_enabled_ = false;
+    attack_ready_.store(false, std::memory_order_release);
+    guidance_ctrl_->reset();
+    if (drone_gps_.is_valid) {
+        target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};
+        if (!ref_gps_valid_) {
+            ref_gps_.lat = drone_gps_.lat;
+            ref_gps_.lon = drone_gps_.lon;
+            ref_gps_.alt = drone_gps_.alt;
+            ref_gps_valid_ = true;
+        }
+    }
+    RCLCPP_INFO(this->get_logger(), "✅ SEARCH mode active. Hovering & tracking target if detected.");
+}
 
 } // namespace los_guidance

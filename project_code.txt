@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-04-22 20:20:14
+Дата: 2026-04-23 01:04:01
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -129,7 +129,7 @@ private:
 #endif  // LOS_GUIDANCE_ADRC_HPP_
 ================================================================================
 Файл: ./include/los_guidance/commander.hpp
-Строк: 70
+Строк: 79
 ================================================================================
 
 #ifndef LOS_GUIDANCE_COMMANDER_HPP_
@@ -143,64 +143,73 @@ private:
 
 namespace los_guidance
 {
-class Commander
-{
-public:
-  using AttackCallback = std::function<void(bool)>;
-  using AutoModeCallback = std::function<void()>;
-  using GpsQueryCallback = std::function<bool(double&, double&, double&)>;
-  using ArmCallback = std::function<void(bool)>;  // 🆕 true=arm, false=disarm
+  class Commander
+  {
+  public:
+    using AttackCallback = std::function<void(bool)>;
+    using AutoModeCallback = std::function<void()>;
+    using GpsQueryCallback = std::function<bool(double &, double &, double &)>;
+    using ArmCallback = std::function<void(bool)>; // 🆕 true=arm, false=disarm
 
-  // 🆕 Домашняя точка
-  struct HomeData { double lat{0}, lon{0}, alt{0}; bool valid{false}; };
-  using HomeCallback = std::function<HomeData()>;
+    // 🆕 Домашняя точка
+    struct HomeData
+    {
+      double lat{0}, lon{0}, alt{0};
+      bool valid{false};
+    };
+    using HomeCallback = std::function<HomeData()>;
 
-  // 🆕 Callback'и для новых команд
-  using LandCallback = std::function<void(double)>;              // land speed (m/s)
-  using SearchRoundCallback = std::function<void(double)>;       // search rotation time (s for 360°)
-  using AltitudeCallback = std::function<void(double)>;          // altitude change (m)
-  using PatrolRoundCallback = std::function<void(double)>;       // patrol diameter (m)
-  using HoldSquareCallback = std::function<void(double)>;        // hold square size (m)
+    // === Callback'и для новых команд ===
+    using LandCallback = std::function<void(double)>;        // land speed (m/s)
+    using SearchRoundCallback = std::function<void(double)>; // search rotation time (s for 360°)
+    using AltitudeCallback = std::function<void(double)>;    // altitude change (m)
+    using PatrolRoundCallback = std::function<void(double)>; // patrol diameter (m)
+    using HoldSquareCallback = std::function<void(double)>;  // hold square size (m)
+    using SearchModeCallback = std::function<void()>;        // 🆕 set_mode search
 
-  explicit Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
-                     GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger,
-                     ArmCallback arm_cb = nullptr,                            // 🆕
-                     LandCallback land_cb = nullptr,                          // 🆕
-                     SearchRoundCallback search_cb = nullptr,                 // 🆕
-                     AltitudeCallback up_cb = nullptr,                        // 🆕
-                     AltitudeCallback down_cb = nullptr,                      // 🆕
-                     PatrolRoundCallback patrol_cb = nullptr,                 // 🆕
-                     HoldSquareCallback hold_cb = nullptr);                   // 🆕
-  ~Commander();
+    explicit Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
+                       GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger,
+                       ArmCallback arm_cb = nullptr,                  // 🆕
+                       LandCallback land_cb = nullptr,                // 🆕
+                       SearchRoundCallback search_round_cb = nullptr, // 🆕
+                       AltitudeCallback up_cb = nullptr,              // 🆕
+                       AltitudeCallback down_cb = nullptr,            // 🆕
+                       PatrolRoundCallback patrol_cb = nullptr,       // 🆕
+                       HoldSquareCallback hold_cb = nullptr,          // 🆕
+                       SearchModeCallback search_mode_cb = nullptr);  // 🆕
 
-  void start();
-  void stop();
+    ~Commander();
 
-private:
-  void listenLoop();
-  void handleConnection(int client_fd);
-  void processCommand(const std::string &data, int client_fd);
-  bool parseAttackCommand(const std::string &data, bool &result);
-  bool parseDoubleValue(const std::string &data, const std::string &key, double &result);  // 🆕
-  void sendResponse(int fd, const std::string &json);
+    void start();
+    void stop();
 
-  int port_;
-  AttackCallback attack_callback_;
-  AutoModeCallback auto_mode_callback_;
-  GpsQueryCallback gps_query_callback_;
-  HomeCallback home_callback_; // 🆕
-  ArmCallback arm_callback_;   // 🆕
-  LandCallback land_callback_;         // 🆕
-  SearchRoundCallback search_callback_; // 🆕
-  AltitudeCallback up_callback_;       // 🆕
-  AltitudeCallback down_callback_;     // 🆕
-  PatrolRoundCallback patrol_callback_; // 🆕
-  HoldSquareCallback hold_callback_;   // 🆕
-  rclcpp::Logger logger_;
-  std::thread listen_thread_;
-  std::atomic<bool> running_{false};
-  int server_fd_ = -1;
-};
+  private:
+    void listenLoop();
+    void handleConnection(int client_fd);
+    void processCommand(const std::string &data, int client_fd);
+    bool parseAttackCommand(const std::string &data, bool &result);
+    bool parseDoubleValue(const std::string &data, const std::string &key, double &result); // 🆕
+    void sendResponse(int fd, const std::string &json);
+
+    int port_;
+    // === Callback members ===
+    AttackCallback attack_callback_;
+    AutoModeCallback auto_mode_callback_;
+    GpsQueryCallback gps_query_callback_;
+    HomeCallback home_callback_;
+    ArmCallback arm_callback_;
+    LandCallback land_callback_;
+    SearchRoundCallback search_callback_;     // для search_round
+    SearchModeCallback search_mode_callback_; // для set_mode search
+    AltitudeCallback up_callback_;
+    AltitudeCallback down_callback_;
+    PatrolRoundCallback patrol_callback_;
+    HoldSquareCallback hold_callback_;
+    rclcpp::Logger logger_;
+    std::thread listen_thread_;
+    std::atomic<bool> running_{false};
+    int server_fd_ = -1;
+  };
 } // namespace los_guidance
 #endif
 ================================================================================
@@ -950,7 +959,7 @@ private:
 #endif // LOS_GUIDANCE_LOS_ESTIMATOR_HPP_
 ================================================================================
 Файл: ./include/los_guidance/node.hpp
-Строк: 468
+Строк: 483
 ================================================================================
 
 /**
@@ -1111,6 +1120,7 @@ namespace los_guidance
 
     // Takeoff параметры
     int takeoff_timeout_s{20};
+double kp_yaw_track{0.5};  // 🆕
   };
 
   /**
@@ -1247,6 +1257,13 @@ namespace los_guidance
      */
     void initCommander();
 
+    /**
+     * @brief Send ARM/DISARM command (10x loop for reliability)
+     * @param arm true=ARM, false=DISARM
+     */
+    void sendArmCommand(bool arm);
+
+
     // === Timer Callbacks ===
     /**
      * @brief Основной цикл управления (вызывается по таймеру)
@@ -1319,7 +1336,12 @@ namespace los_guidance
     bool attack_enabled_{false};      ///< Авто-атака включена
     bool start_attack_{false};        ///< Сигнал начала атаки
     std::atomic<bool> attack_ready_{false}; ///< Система готова к атаке (lock-free)
-    bool update_acc_setpoint_{false}; ///< Флаг обновления ускорения
+// std::atomic<double> last_los_cam_y_{0.0};  // 🆕
+std::atomic<double> last_los_cam_y_{0.0};  // 🆕
+bool update_acc_setpoint_{false};  
+
+
+
 
     // === Ключи синхронизации ===
     std::string att_sync_key_{"att"};       ///< Ключ attitude
@@ -1405,6 +1427,7 @@ namespace los_guidance
     void vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
 
     void executeAutoModeSequence();
+void executeSearchMode();                          // 🆕
     static double haversineDist(double lat1, double lon1, double lat2, double lon2);
     static bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
 
@@ -1417,6 +1440,7 @@ namespace los_guidance
   static double haversineDist(double lat1, double lon1, double lat2, double lon2);
   static bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
   void executeAutoModeSequence();
+void executeSearchMode();                          // 🆕
 
 } // namespace los_guidance
 
@@ -2147,7 +2171,7 @@ private:
 
 ================================================================================
 Файл: ./src/commander.cpp
-Строк: 435
+Строк: 439
 ================================================================================
 
 #include "los_guidance/commander.hpp"
@@ -2164,13 +2188,14 @@ namespace los_guidance
 
   Commander::Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
                        GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger,
-                       ArmCallback arm_cb, LandCallback land_cb, SearchRoundCallback search_cb,
+                       ArmCallback arm_cb, LandCallback land_cb, SearchRoundCallback search_round_cb,
                        AltitudeCallback up_cb, AltitudeCallback down_cb,
                        PatrolRoundCallback patrol_cb, HoldSquareCallback hold_cb)
       : port_(port), attack_callback_(std::move(attack_cb)),
         auto_mode_callback_(std::move(auto_cb)), gps_query_callback_(std::move(gps_cb)),
         home_callback_(std::move(home_cb)), arm_callback_(std::move(arm_cb)),
-        land_callback_(std::move(land_cb)), search_callback_(std::move(search_cb)),
+        land_callback_(std::move(land_cb)), search_callback_(std::move(search_round_cb)),
+  search_mode_callback_(std::move(search_mode_cb)),
         up_callback_(std::move(up_cb)), down_callback_(std::move(down_cb)),
         patrol_callback_(std::move(patrol_cb)), hold_callback_(std::move(hold_cb)),
         logger_(std::move(logger)) {}
@@ -2514,6 +2539,9 @@ namespace los_guidance
       }
       return;
     }
+
+
+
 
     // 3. Обычная команда атаки
     bool attack_cmd = false;
@@ -3580,7 +3608,7 @@ int main(int argc, char **argv) {
 }
 ================================================================================
 Файл: ./src/node.cpp
-Строк: 2241
+Строк: 2290
 ================================================================================
 
 /**
@@ -3806,6 +3834,17 @@ namespace los_guidance
     config_.sync_buffer_size = this->get_parameter("sync.buffer_size").as_int();
     config_.sync_retention_us = this->get_parameter("sync.retention_us").as_int();
 
+  // === Search mode params ===
+
+  this->declare_parameter("search.kp_yaw_track", 0.5);
+
+  config_.kp_yaw_track = this->get_parameter("search.kp_yaw_track").as_double();
+
+  // === Search mode params ===
+
+
+  config_.kp_yaw_track = this->get_parameter("search.kp_yaw_track").as_double();
+
     RCLCPP_INFO(this->get_logger(), "Parameters loaded successfully");
     commander_enabled_ = this->get_parameter("commander.enable").as_bool();
     RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
@@ -3981,35 +4020,11 @@ namespace los_guidance
           // 🆕 Колбэк для команд ARM/DISARM (с прерыванием взлёта)
           [this](bool arm)
           {
-            if (arm)
+            this->sendArmCommand(arm);  // 10x reliable loop
+            if (!arm && takeoff_running_)  // DISARM abort logic
             {
-              RCLCPP_INFO(this->get_logger(), "🔑 ARM command received");
-              px4_msgs::msg::VehicleCommand cmd;
-              cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
-              cmd.param1 = 1.0f;
-              cmd.target_system = 1;
-              cmd.target_component = 1;
-              cmd.from_external = true;
-              cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-              vehicle_cmd_pub_->publish(cmd);
-            }
-            else
-            {
-              RCLCPP_INFO(this->get_logger(), "🔓 DISARM command received");
-              // 🆕 Если взлёт активен — прерываем
-              if (takeoff_running_)
-              {
-                RCLCPP_WARN(this->get_logger(), "⚠️ Aborting takeoff due to DISARM");
-                takeoff_abort_ = true;
-              }
-              px4_msgs::msg::VehicleCommand cmd;
-              cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
-              cmd.param1 = 0.0f;
-              cmd.target_system = 1;
-              cmd.target_component = 1;
-              cmd.from_external = true;
-              cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-              vehicle_cmd_pub_->publish(cmd);
+              RCLCPP_WARN(this->get_logger(), "⚠️ Aborting takeoff due to DISARM");
+              takeoff_abort_ = true;
             }
           },
           // 🆕 Колбэк для приземления
@@ -4086,6 +4101,25 @@ namespace los_guidance
     {
       RCLCPP_WARN(this->get_logger(), "⚠️ Commander disabled (commander.enable=false)");
     }
+  }
+
+  void Node::sendArmCommand(bool arm)
+  {
+    const char* action = arm ? "ARM" : "DISARM";
+    RCLCPP_INFO(this->get_logger(), "🔑 Sending %s command (10x loop)...", action);
+    for (int i = 0; i < 10; i++)
+    {
+      px4_msgs::msg::VehicleCommand cmd;
+      cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+      cmd.param1 = arm ? 1.0f : 0.0f;
+      cmd.target_system = 1;
+      cmd.target_component = 1;
+      cmd.from_external = true;
+      cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+      vehicle_cmd_pub_->publish(cmd);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    RCLCPP_INFO(this->get_logger(), "✅ %s sequence complete", action);
   }
 
   void Node::createPublishers()
@@ -4341,6 +4375,7 @@ namespace los_guidance
                              target.is_valid ? 1 : 0);
       }
 
+    last_los_cam_y_.store(target.los_cam.y(), std::memory_order_relaxed);  // 🆕
       if (target.is_valid)
       {
         // RCLCPP_INFO(this->get_logger(),
@@ -4774,6 +4809,39 @@ namespace los_guidance
     }
 
     // === ФАЗА 2: ВИЗУАЛЬНАЯ АТАКА (LOS Guidance) ===
+
+// === ФАЗА 2.5: ВИЗУАЛЬНЫЙ ПОИСК (Yaw Tracking + Hover) ===
+if (auto_phase_ == AutoPhase::VISUAL_SEARCH)
+{
+    vehicle_ctrl_->publishOffboardControlMode();
+    bool target_seen = attack_ready_.load(std::memory_order_acquire);
+
+    if (target_seen && start_attack_) {
+        auto_phase_ = AutoPhase::VISUAL_ATTACK;
+        RCLCPP_INFO(this->get_logger(), "🚀 Switching from SEARCH to VISUAL ATTACK");
+    } else {
+        double yaw_rate_cmd = 0.0;
+        if (target_seen) {
+            yaw_rate_cmd = -config_.kp_yaw_track * last_los_cam_y_.load(std::memory_order_relaxed);
+            double max_yaw_rate = 30.0 * DEG2RAD;
+            yaw_rate_cmd = std::clamp(yaw_rate_cmd, -max_yaw_rate, max_yaw_rate);
+        }
+
+        px4_msgs::msg::TrajectorySetpoint msg;
+        msg.position = {NAN, NAN, NAN};
+        msg.velocity = {NAN, NAN, NAN};
+        msg.acceleration = {NAN, NAN, NAN};
+        msg.yaw = NAN;
+        msg.yawspeed = static_cast<float>(yaw_rate_cmd);
+        msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        trajectory_setpoint_pub_->publish(msg);
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "🔍 SEARCH: yaw_rate=%.1f deg/s, target=%s",
+                             yaw_rate_cmd * 180.0 / M_PI, target_seen ? "LOCKED" : "SCANNING");
+        return;
+    }
+}
+
 
     if (auto_phase_ == AutoPhase::VISUAL_ATTACK)
     {
@@ -5338,19 +5406,7 @@ namespace los_guidance
       start_alt = start_alt_;
 
     // 1. Arm (отправляем многократно для надёжности)
-    RCLCPP_INFO(this->get_logger(), "🔑 Sending ARM command...");
-    for (int i = 0; i < 10; i++)
-    {
-      px4_msgs::msg::VehicleCommand arm_cmd;
-      arm_cmd.command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
-      arm_cmd.param1 = 1.0f;
-      arm_cmd.target_system = 1;
-      arm_cmd.target_component = 1;
-      arm_cmd.from_external = true;
-      arm_cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-      vehicle_cmd_pub_->publish(arm_cmd);
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+    sendArmCommand(true);
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // 2. Offboard (отправляем многократно для надёжности)
@@ -5823,8 +5879,29 @@ namespace los_guidance
     return true;
   }
 
-} // namespace los_guidance
 
+void Node::executeSearchMode()
+{
+    RCLCPP_INFO(this->get_logger(), "🔍 Starting SEARCH mode...");
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    auto_phase_ = AutoPhase::VISUAL_SEARCH;
+    start_attack_ = false;
+    attack_enabled_ = false;
+    attack_ready_.store(false, std::memory_order_release);
+    guidance_ctrl_->reset();
+    if (drone_gps_.is_valid) {
+        target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};
+        if (!ref_gps_valid_) {
+            ref_gps_.lat = drone_gps_.lat;
+            ref_gps_.lon = drone_gps_.lon;
+            ref_gps_.alt = drone_gps_.alt;
+            ref_gps_valid_ = true;
+        }
+    }
+    RCLCPP_INFO(this->get_logger(), "✅ SEARCH mode active. Hovering & tracking target if detected.");
+}
+
+} // namespace los_guidance
 ================================================================================
 Файл: ./src/sensor_sync.cpp
 Строк: 166
@@ -7170,5 +7247,5 @@ def generate_launch_description():
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 7013
+Всего строк: 7090
 ================================================================================

@@ -156,6 +156,7 @@ namespace los_guidance
 
     // Takeoff параметры
     int takeoff_timeout_s{20};
+double kp_yaw_track{0.5};  // 🆕
   };
 
   /**
@@ -371,7 +372,12 @@ namespace los_guidance
     bool attack_enabled_{false};      ///< Авто-атака включена
     bool start_attack_{false};        ///< Сигнал начала атаки
     std::atomic<bool> attack_ready_{false}; ///< Система готова к атаке (lock-free)
-    bool update_acc_setpoint_{false}; ///< Флаг обновления ускорения
+// std::atomic<double> last_los_cam_y_{0.0};  // 🆕
+std::atomic<double> last_los_cam_y_{0.0};  // 🆕
+bool update_acc_setpoint_{false};  
+
+
+
 
     // === Ключи синхронизации ===
     std::string att_sync_key_{"att"};       ///< Ключ attitude
@@ -457,6 +463,7 @@ namespace los_guidance
     void vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
 
     void executeAutoModeSequence();
+void executeSearchMode();                          // 🆕
     static double haversineDist(double lat1, double lon1, double lat2, double lon2);
     static bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
 
@@ -469,6 +476,7 @@ namespace los_guidance
   static double haversineDist(double lat1, double lon1, double lat2, double lon2);
   static bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
   void executeAutoModeSequence();
+void executeSearchMode();                          // 🆕
 
 } // namespace los_guidance
 

@@ -10,18 +10,21 @@
 namespace los_guidance
 {
 
+  
   Commander::Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
-                       GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger,
-                       ArmCallback arm_cb, LandCallback land_cb, SearchRoundCallback search_cb,
-                       AltitudeCallback up_cb, AltitudeCallback down_cb,
-                       PatrolRoundCallback patrol_cb, HoldSquareCallback hold_cb)
-      : port_(port), attack_callback_(std::move(attack_cb)),
-        auto_mode_callback_(std::move(auto_cb)), gps_query_callback_(std::move(gps_cb)),
-        home_callback_(std::move(home_cb)), arm_callback_(std::move(arm_cb)),
-        land_callback_(std::move(land_cb)), search_callback_(std::move(search_cb)),
-        up_callback_(std::move(up_cb)), down_callback_(std::move(down_cb)),
-        patrol_callback_(std::move(patrol_cb)), hold_callback_(std::move(hold_cb)),
-        logger_(std::move(logger)) {}
+    GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger,
+    ArmCallback arm_cb, LandCallback land_cb, SearchRoundCallback search_round_cb,
+    AltitudeCallback up_cb, AltitudeCallback down_cb,
+    PatrolRoundCallback patrol_cb, HoldSquareCallback hold_cb,
+    SearchModeCallback search_mode_cb)  // ← Добавлен 14-й параметр
+    : port_(port), attack_callback_(std::move(attack_cb)),
+      auto_mode_callback_(std::move(auto_cb)), gps_query_callback_(std::move(gps_cb)),
+      home_callback_(std::move(home_cb)), arm_callback_(std::move(arm_cb)),
+      land_callback_(std::move(land_cb)), search_callback_(std::move(search_round_cb)),
+      search_mode_callback_(std::move(search_mode_cb)),  // ← Инициализация нового поля
+      up_callback_(std::move(up_cb)), down_callback_(std::move(down_cb)),
+      patrol_callback_(std::move(patrol_cb)), hold_callback_(std::move(hold_cb)),
+      logger_(std::move(logger)) {}
 
   Commander::~Commander() { stop(); }
 
@@ -362,6 +365,9 @@ namespace los_guidance
       }
       return;
     }
+
+
+
 
     // 3. Обычная команда атаки
     bool attack_cmd = false;
