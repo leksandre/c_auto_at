@@ -189,6 +189,8 @@ double kp_yaw_track{0.5};  // 🆕
 
     void postConstruct();
 
+    
+    void declareCommonParameters(); 
     /**
      * @brief Деструктор
      */
@@ -321,6 +323,7 @@ double kp_yaw_track{0.5};  // 🆕
      * @param debug_data Массив отладочных данных
      */
     void publishInterceptDebug(const std::vector<float> &debug_data);
+ 
 
     // === Компоненты (контроллеры) ===
     std::unique_ptr<TargetTracker> target_tracker_;     ///< Трекинг цели

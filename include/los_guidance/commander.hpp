@@ -66,7 +66,7 @@ namespace los_guidance
     ArmCallback arm_callback_;
     LandCallback land_callback_;
     SearchRoundCallback search_callback_;     // для search_round
-    SearchModeCallback search_mode_callback_; // для set_mode search
+    SearchModeCallback search_mode_callback_; // для set_mode search 
     AltitudeCallback up_callback_;
     AltitudeCallback down_callback_;
     PatrolRoundCallback patrol_callback_;
