@@ -253,6 +253,13 @@ double kp_yaw_track{0.5};  // 🆕
     void vehicleStatusCallback(px4_msgs::msg::VehicleStatus::SharedPtr msg);
 
     /**
+     * @brief Выполняет последовательность взлета (Takeoff)
+     * @param skip_takeoff Если true, пропускать физический взлет (для симуляции или если уже летит)
+     * @return void
+     */
+    void executeTakeoffSequence(bool skip_takeoff);
+    
+    /**
      * @brief Обработка ориентации дрона
      * @param msg Сообщение VehicleAttitude
      */

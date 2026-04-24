@@ -181,7 +181,20 @@ namespace los_guidance
         auto_mode_callback_();
       sendResponse(client_fd, "{\"status\":\"success\",\"command\":\"SET_MODE\",\"mode\":\"auto\"}\n");
       return;
+
     }
+
+
+        // 🆕 2.1 Обработка set_mode: search / searshА
+    if (data.find("\"set_mode\"") != std::string::npos &&
+        (data.find("search") != std::string::npos || data.find("searsh") != std::string::npos))
+    {
+        RCLCPP_INFO(logger_, "🔍 Received command: set_mode search");
+        if (search_mode_callback_) search_mode_callback_();
+        sendResponse(client_fd, "{\"status\":\"success\",\"command\":\"SET_MODE\",\"mode\":\"search\"}\n");
+        return;
+    }
+
 
     // 🆕 2.1 Обработка arm/disarm
     if (data.find("\"arm\"") != std::string::npos)
