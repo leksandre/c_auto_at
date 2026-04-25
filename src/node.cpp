@@ -274,6 +274,20 @@ namespace los_guidance
 
     config_.kp_yaw_track = this->get_parameter("search.kp_yaw_track").as_double();
 
+    this->declare_parameter("gps.source", "uart"); // Возможные значения: "px4", "uart"
+    std::string gps_source = this->get_parameter("gps.source").as_string();
+
+    if (gps_source == "uart")
+    {
+      RCLCPP_INFO(this->get_logger(), "🛰️ GPS Source set to: UART");
+      use_uart_gps_ = true; // Предположим, у вас есть такой флаг, см. ниже
+    }
+    else
+    {
+      RCLCPP_INFO(this->get_logger(), "🛰️ GPS Source set to: PX4 (Default)");
+      use_uart_gps_ = false;
+    }
+
     RCLCPP_INFO(this->get_logger(), "Parameters loaded successfully");
     commander_enabled_ = this->get_parameter("commander.enable").as_bool();
     RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
@@ -370,12 +384,83 @@ namespace los_guidance
     {
       commander_ = std::make_unique<Commander>(
           commander_port_,
+          // [this](bool start)
+          // {
+          //   std::lock_guard<std::mutex> lock(state_mutex_);
+          //   start_attack_ = start;
+          //   RCLCPP_INFO(this->get_logger(), "🌐 Commander: start_attack_ set to %s", start ? "true" : "false");
+          // },
+
           [this](bool start)
           {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            start_attack_ = start;
-            RCLCPP_INFO(this->get_logger(), "🌐 Commander: start_attack_ set to %s", start ? "true" : "false");
+
+            if (start)
+            {
+              start_attack_ = true;
+              attack_enabled_ = true;
+              guidance_ctrl_->setAttackMode(true); // 🆕 Явный старт режима в контроллере
+              RCLCPP_INFO(this->get_logger(), "🎯 Attack STARTED via TCP command");
+
+              if (auto_phase_ == AutoPhase::VISUAL_SEARCH && attack_ready_.load(std::memory_order_acquire))
+              {
+                auto_phase_ = AutoPhase::VISUAL_ATTACK;
+              }
+            }
+            else
+            {
+              start_attack_ = false;
+              attack_enabled_ = false;
+              guidance_ctrl_->setAttackMode(false); // 🆕 Явный стоп и сброс в контроллере
+              guidance_ctrl_->reset();              // Общий сброс
+
+              if (auto_phase_ == AutoPhase::VISUAL_ATTACK)
+              {
+                auto_phase_ = AutoPhase::VISUAL_SEARCH;
+                RCLCPP_INFO(this->get_logger(), "⛔ Attack STOPPED. Returned to VISUAL SEARCH mode");
+              }
+            }
           },
+
+          // [this](bool start)
+          // {
+          //   std::lock_guard<std::mutex> lock(state_mutex_);
+
+          //   if (start)
+          //   {
+          //     // Команда {"start_attack": true}
+          //     start_attack_ = true;
+          //     attack_enabled_ = true; // Также включаем флаг разрешения атаки
+          //     RCLCPP_INFO(this->get_logger(), "🎯 Attack STARTED via TCP command");
+
+          //     // Если мы были в поиске и цель видна, можно сразу перейти в атаку
+          //     if (auto_phase_ == AutoPhase::VISUAL_SEARCH && attack_ready_.load(std::memory_order_acquire))
+          //     {
+          //       auto_phase_ = AutoPhase::VISUAL_ATTACK;
+          //       RCLCPP_INFO(this->get_logger(), "🚀 Switched to VISUAL ATTACK immediately");
+          //     }
+          //   }
+          //   else
+          //   {
+          //     // Команда {"start_attack": false}
+          //     start_attack_ = false;
+          //     attack_enabled_ = false;
+          //     guidance_ctrl_->reset(); // Сброс контроллера наведения
+
+          //     // Переводим в режим поиска, как вы просили
+          //     if (auto_phase_ == AutoPhase::VISUAL_ATTACK)
+          //     {
+          //       auto_phase_ = AutoPhase::VISUAL_SEARCH;
+          //       RCLCPP_INFO(this->get_logger(), "⛔ Attack STOPPED. Returned to VISUAL SEARCH mode");
+          //     }
+          //     else
+          //     {
+          //       RCLCPP_INFO(this->get_logger(), "⛔ Attack flag cleared. Mode: %s",
+          //                   (auto_phase_ == AutoPhase::VISUAL_SEARCH) ? "SEARCH" : "OTHER");
+          //     }
+          //   }
+          // },
+
           [this]() // ← "set_mode": "auto" calls this → executeAutoModeSequence()
           {
             std::thread(&Node::executeAutoModeSequence, this).detach();
@@ -687,26 +772,83 @@ namespace los_guidance
   {
     if (!msg)
       return;
-
-    // 1. Сохраняем в state_mutex_ (потокобезопасно)
+    
     std::lock_guard<std::mutex> lock(state_mutex_);
-    drone_gps_.lat = msg->lat;
-    drone_gps_.lon = msg->lon;
-    drone_gps_.alt = msg->alt;
-    drone_gps_.timestamp_us = msg->timestamp_sample;
 
-    // 🛠 FIX: valid_global_pos удалён в новых px4_msgs.
-    // Считаем GPS валидным, если пришло сообщение с ненулевым временем.
-    drone_gps_.is_valid = (msg->timestamp_sample > 0);
+    if (use_uart_gps_)
+    {
+      // Не обновляем lat/lon/alt из PX4
+      // drone_gps_.lat = ...
+      // drone_gps_.lon = ...
+      // drone_gps_.alt = ...
 
-    // 2. Синхронизируем с IMU/attitude через SensorSync
-    // 🛠 FIX: msg уже является std::shared_ptr, не нужно оборачивать в make_shared
-    sensor_sync_->addMessage("drone_gps", msg->timestamp_sample, msg);
+      // Можно логировать, что мы игнорируем PX4 GPS
+      // RCLCPP_DEBUG_THROTTLE(..., "Ignoring PX4 GPS position, using UART");
+    }
+    else
+    {
+      // 1. Сохраняем в state_mutex_ (потокобезопасно)
+      
+      // RCLCPP_INFO(this->get_logger(), "GPS messsage Subscribers vehicleGlobalPositionCallback");
+      drone_gps_.lat = msg->lat;
+      drone_gps_.lon = msg->lon;
+      drone_gps_.alt = msg->alt;
+      drone_gps_.timestamp_us = msg->timestamp_sample;
 
-    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                          "GPS: %.7f, %.7f, %.2f (valid: %s)",
-                          msg->lat, msg->lon, msg->alt,
-                          drone_gps_.is_valid ? "Y" : "N");
+      // 🛠 FIX: valid_global_pos удалён в новых px4_msgs.
+      // Считаем GPS валидным, если пришло сообщение с ненулевым временем.
+      drone_gps_.is_valid = (msg->timestamp_sample > 0);
+
+      // 2. Синхронизируем с IMU/attitude через SensorSync
+      // 🛠 FIX: msg уже является std::shared_ptr, не нужно оборачивать в make_shared
+      if (drone_gps_.is_valid)
+      {
+        sensor_sync_->addMessage("drone_gps", msg->timestamp_sample, msg);
+
+        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                              "GPS: %.7f, %.7f, %.2f (valid: %s)",
+                              msg->lat, msg->lon, msg->alt,
+                              drone_gps_.is_valid ? "Y" : "N");
+      }
+    }
+  }
+
+  void Node::uartGpsCallback()
+  {
+    GpsData uart_data = uart_gps_parser_.getData();
+
+    
+    if (uart_data.is_valid)
+    {
+      RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                            "📡 UART GPS: %.6f, %.6f, %.2f (Sats: %d)",
+                            uart_data.latitude, uart_data.longitude, uart_data.altitude,
+                            uart_data.satellites);
+      {
+
+
+
+        // RCLCPP_INFO(this->get_logger(), "GPS messsage Subscribers uartGpsCallback");
+
+        std::lock_guard<std::mutex> lock(state_mutex_);
+
+        // Записываем данные UART в общее состояние дрона
+        drone_gps_.lat = uart_data.latitude;
+        drone_gps_.lon = uart_data.longitude;
+        drone_gps_.alt = uart_data.altitude;
+        drone_gps_.is_valid = true;
+        drone_gps_.timestamp_us = uart_data.timestamp_us;
+
+        // Опционально: логирование раз в N секунд
+        static int log_counter = 0;
+        if (++log_counter > 50)
+        { // ~1 секунда при 50 Гц
+          RCLCPP_DEBUG(this->get_logger(), "📡 UART GPS Updated: %.6f, %.6f, %.2f",
+                       drone_gps_.lat, drone_gps_.lon, drone_gps_.alt);
+          log_counter = 0;
+        }
+      }
+    }
   }
 
   void Node::trackerResultCallback(ai_service::msg::TrackerResult::SharedPtr msg)
@@ -886,51 +1028,53 @@ namespace los_guidance
     }
   }
 
-  void Node::uartGpsCallback()
-{
-    // Определяем, используем ли мы UART GPS как основной источник
-    // Логика: Если PX4 GPS (drone_gps_) невалиден или старый, пробуем взять данные из UART
-    // Или можно всегда перезаписывать drone_gps_, если это внешний приемник
-    
-    // ВАЖНО: Убедитесь, что вы понимаете разницу между GPS на борту PX4 и внешним GPS.
-    // Обычно PX4 использует свой GPS. Этот код полезен, если:
-    // 1. PX4 GPS сломан.
-    // 2. Вы хотите дублировать данные.
-    // 3. Вы тестируете без PX4 GPS.
+  // void Node::uartGpsCallback()
+  // {
+  //   // Определяем, используем ли мы UART GPS как основной источник
+  //   // Логика: Если PX4 GPS (drone_gps_) невалиден или старый, пробуем взять данные из UART
+  //   // Или можно всегда перезаписывать drone_gps_, если это внешний приемник
 
-    GpsData uart_data = uart_gps_parser_.getData();
+  //   // ВАЖНО: Убедитесь, что вы понимаете разницу между GPS на борту PX4 и внешним GPS.
+  //   // Обычно PX4 использует свой GPS. Этот код полезен, если:
+  //   // 1. PX4 GPS сломан.
+  //   // 2. Вы хотите дублировать данные.
+  //   // 3. Вы тестируете без PX4 GPS.
 
-    if (uart_data.is_valid) {
-        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                              "📡 UART GPS: %.6f, %.6f, %.2f (Sats: %d)",
-                              uart_data.latitude, uart_data.longitude, uart_data.altitude,
-                              uart_data.satellites);
+  //   GpsData uart_data = uart_gps_parser_.getData();
 
-        // Синхронизируем данные с внутренним состоянием дрона
-        // Используем mutex для безопасности потоков
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            
-            // Обновляем drone_gps_ только если он невалиден или мы явно хотим использовать UART
-            // Здесь простая логика: если PX4 GPS не пришел давно, берем UART.
-            // Для простоты, просто обновляем, если UART валиден.
-            // ⚠️ ВНИМАНИЕ: Это может конфликтовать с реальным GPS PX4. 
-            // Рекомендуется использовать этот GPS только если PX4 GPS недоступен.
-            
-            // Пример: Если drone_gps_.is_valid == false, то берем UART
-            if (!drone_gps_.is_valid) {
-                 drone_gps_.lat = uart_data.latitude;
-                 drone_gps_.lon = uart_data.longitude;
-                 drone_gps_.alt = uart_data.altitude;
-                 drone_gps_.is_valid = true;
-                 drone_gps_.timestamp_us = uart_data.timestamp_us;
-                 
-                 RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                                      "🔄 Using UART GPS as fallback");
-            }
-        }
-    }
-}
+  //   if (uart_data.is_valid)
+  //   {
+  //     RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+  //                           "📡 UART GPS: %.6f, %.6f, %.2f (Sats: %d)",
+  //                           uart_data.latitude, uart_data.longitude, uart_data.altitude,
+  //                           uart_data.satellites);
+
+  //     // Синхронизируем данные с внутренним состоянием дрона
+  //     // Используем mutex для безопасности потоков
+  //     {
+  //       std::lock_guard<std::mutex> lock(state_mutex_);
+
+  //       // Обновляем drone_gps_ только если он невалиден или мы явно хотим использовать UART
+  //       // Здесь простая логика: если PX4 GPS не пришел давно, берем UART.
+  //       // Для простоты, просто обновляем, если UART валиден.
+  //       // ⚠️ ВНИМАНИЕ: Это может конфликтовать с реальным GPS PX4.
+  //       // Рекомендуется использовать этот GPS только если PX4 GPS недоступен.
+
+  //       // Пример: Если drone_gps_.is_valid == false, то берем UART
+  //       if (!drone_gps_.is_valid)
+  //       {
+  //         drone_gps_.lat = uart_data.latitude;
+  //         drone_gps_.lon = uart_data.longitude;
+  //         drone_gps_.alt = uart_data.altitude;
+  //         drone_gps_.is_valid = true;
+  //         drone_gps_.timestamp_us = uart_data.timestamp_us;
+
+  //         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+  //                              "🔄 Using UART GPS as fallback");
+  //       }
+  //     }
+  //   }
+  // }
 
   void Node::trackBBox2DCallback(vision_msgs::msg::Detection2D::SharedPtr msg)
   {
@@ -1156,6 +1300,7 @@ namespace los_guidance
     // === ФАЗА 1: СБЛИЖЕНИЕ ПО GPS ===
     if (auto_phase_ == AutoPhase::GPS_APPROACH)
     {
+      RCLCPP_INFO(this->get_logger(), "GPS messsage Subscribers controlLoopTimerCallback");
       // 🆕 Инициализируем ref_gps_ при первом входе (если ещё не установлен)
       if (!ref_gps_valid_ && drone_gps_.is_valid)
       {
@@ -1163,14 +1308,25 @@ namespace los_guidance
         ref_gps_.lon = drone_gps_.lon;
         ref_gps_.alt = drone_gps_.alt;
         ref_gps_valid_ = true;
-        RCLCPP_INFO(this->get_logger(), "📍 Reference GPS set: %.6f, %.6f, %.2f", ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+        // RCLCPP_INFO(this->get_logger(), "📍 Reference GPS set: %.6f, %.6f, %.2f", ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+        
+        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+                            "📡 UART GPS: %.6f, %.6f, %.2f ",
+                            drone_gps_.lat, drone_gps_.lon, drone_gps_.alt);
       }
+      
 
       if (ref_gps_valid_)
       {
         // Конвертируем цель в локальные NED-координаты относительно точки взлёта
         target_ned_ = gpsToNed(target_gps_.lat, target_gps_.lon, target_gps_.alt,
                                ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+                               
+        // RCLCPP_INFO(this->get_logger(), "📍 Reference GPS get to ned: %.6f, %.6f, %.2f", ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+        
+        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+                            "📡 Reference GPS: %.6f, %.6f, %.2f",
+                            drone_gps_.lat, drone_gps_.lon, drone_gps_.alt);
       }
 
       bool camera_locked = attack_ready_.load(std::memory_order_acquire);
@@ -2141,7 +2297,7 @@ namespace los_guidance
         ref_gps_.lon = drone_gps_.lon;
         ref_gps_.alt = drone_gps_.alt;
         ref_gps_valid_ = true;
-        RCLCPP_INFO(this->get_logger(), "📍 Reference GPS set before poll: %.6f, %.6f, %.2f",
+        RCLCPP_INFO(this->get_logger(), "📍 Reference GPS set before poll 11 executeAutoModeSequence: %.6f, %.6f, %.2f",
                     ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
       }
     }
@@ -2560,7 +2716,7 @@ namespace los_guidance
         ref_gps_.lon = drone_gps_.lon;
         ref_gps_.alt = drone_gps_.alt;
         ref_gps_valid_ = true;
-        RCLCPP_INFO(this->get_logger(), "📍 Reference GPS set before poll: %.6f, %.6f, %.2f",
+        RCLCPP_INFO(this->get_logger(), "📍 Reference GPS set before poll 22 executeSearchMode: %.6f, %.6f, %.2f",
                     ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
       }
     }

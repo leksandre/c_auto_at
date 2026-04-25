@@ -214,9 +214,12 @@ double kp_yaw_track{0.5};  // 🆕
   private:
     // === Инициализация ===
 
-    // В private секции класса Node:
+
     void uartGpsCallback();
+
+    bool use_uart_gps_{false}; ///< Флаг использования UART GPS вместо PX4
     
+
     /**
      * @brief Загрузка всех параметров из YAML
      */
