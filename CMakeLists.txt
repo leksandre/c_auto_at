@@ -50,6 +50,7 @@ set(project_SOURCE_FILES
   src/vehicle_controller.cpp    
   src/sensor_sync.cpp
   src/commander.cpp 
+  src/gps_parser.cpp 
 )
 
 # Executable target

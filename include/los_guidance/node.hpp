@@ -24,6 +24,7 @@
 #include <atomic>
 #include <optional>
 
+
 // === Сетевые заголовки (для TCP клиента/сервера) ===
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -56,6 +57,10 @@
 #include "los_guidance/sensor_sync.hpp"
 #include "los_guidance/adrc.hpp"
 #include "los_guidance/commander.hpp"
+
+
+#include "los_guidance/gps_parser.hpp"
+
 
 namespace los_guidance
 {
@@ -208,6 +213,10 @@ double kp_yaw_track{0.5};  // 🆕
 
   private:
     // === Инициализация ===
+
+    // В private секции класса Node:
+    void uartGpsCallback();
+    
     /**
      * @brief Загрузка всех параметров из YAML
      */
@@ -373,9 +382,12 @@ double kp_yaw_track{0.5};  // 🆕
     rclcpp::CallbackGroup::SharedPtr ai_callback_group_;      ///< Группа для AI подписок (отдельный поток)
     rclcpp::CallbackGroup::SharedPtr control_callback_group_; ///< Группа для PX4 telemetry + timer
 
-    // === Добавьте после существующих полей ===
     double start_lat_{0.0}, start_lon_{0.0}, start_alt_{0.0};
     bool start_gps_valid_{false};
+
+    los_guidance::GpsParser uart_gps_parser_;
+    rclcpp::TimerBase::SharedPtr uart_gps_timer_; ///< Таймер для опроса UART GPS и публикации/синхронизации
+
 
     // === Состояние (защищено mutex) ===
     mutable std::mutex state_mutex_;  ///< Защита состояния

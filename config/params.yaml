@@ -1,5 +1,9 @@
 los_guidance_node:
   ros__parameters:
+    uart_gps:
+      enable: true       # Включить чтение внешнего GPS через UART
+      port: "/dev/ttyUSB0" # Путь к вашему USB-UART адаптеру
+      baudrate: 9600     # Стандартная скорость для большинства модулей (UBLOX и т.д.)
     logging:
       throttle_interval_ms: 136000
     takeoff:
