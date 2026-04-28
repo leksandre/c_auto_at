@@ -10,16 +10,16 @@ los_guidance_node:
       throttle_interval_ms: 136000
     takeoff:
       climb_rate_mps: -3.0  # 10 м/с
-      target_altitude_m: 30.0 
+      target_altitude_m: 80.0 
       altitude_threshold_m: 1.5 
       min_altitude_already_flying_m: 2.0 
-      min_cycles_for_already_flying: 20 
+      min_cycles_for_already_flying: 120 
       skip: false                    # Пропуск взлёта
       visual_searching: true         # 🔍 Визуальный поиск после взлёта
       visual_search_timeout_s: 300   # ⏰ 5 минут ожидания
       timeout_s: 20
     sensor_sync:
-      debug_log_interval: 500  # Вывод на 1-м и каждый 500-й раз
+      debug_log_interval: 165000  # Вывод на 1-м и каждый 500-й раз
     # === Tracker ===
     camera:
       # Камера
@@ -136,5 +136,5 @@ los_guidance_node:
     commander:
       enable: true
       port: 11472
-      targets: ["192.168.11.181", "192.168.11.183", "192.168.11.184"] # если лист пустой... какая логика?
-      target_port: 11471  # Порт, на котором цели слушают запросы SHOWGPS
+      targets: ["192.168.14.169", "192.168.14.203", "192.168.14.175"] # если лист пустой... какая логика?
+      target_port: 11472  # Порт, на котором цели слушают запросы SHOWGPS //11471 было

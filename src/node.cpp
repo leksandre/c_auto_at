@@ -262,7 +262,7 @@ namespace los_guidance
     this->declare_parameter("commander.enable", false);
     this->declare_parameter("commander.port", 11472);
     this->declare_parameter("commander.targets", std::vector<std::string>{});
-    this->declare_parameter("commander.target_port", 11471);
+    this->declare_parameter("commander.target_port", 11472); // 11471 было
 
     commander_enabled_ = this->get_parameter("commander.enable").as_bool();
     commander_port_ = static_cast<int>(this->get_parameter("commander.port").as_int());
@@ -292,6 +292,24 @@ namespace los_guidance
     commander_enabled_ = this->get_parameter("commander.enable").as_bool();
     RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d",
                 commander_enabled_ ? "TRUE" : "FALSE", commander_port_);
+
+    RCLCPP_INFO(this->get_logger(), "🔧 takeoff.target_altitude_m: %.1f m",
+                this->get_parameter("takeoff.target_altitude_m").as_double());
+
+    auto targets = this->get_parameter("commander.targets").as_string_array();
+    std::string targets_str = "[]";
+    if (!targets.empty())
+    {
+      std::ostringstream oss;
+      std::copy(targets.begin(), targets.end() - 1,
+                std::ostream_iterator<std::string>(oss, ", "));
+      oss << targets.back();
+      targets_str = "[" + oss.str() + "]";
+    }
+    RCLCPP_INFO(this->get_logger(), "🔧 commander.targets: %s", targets_str.c_str());
+
+    RCLCPP_INFO(this->get_logger(), "🔧 commander.target_port: %ld",
+                this->get_parameter("commander.target_port").as_int());
   }
 
   void Node::initializeControllers()
@@ -504,15 +522,27 @@ namespace los_guidance
             }
             else
             {
-              RCLCPP_WARN(this->get_logger(), "🏠 No home coordinates! Triggering emergency LAND.");
+              // 🔽 ДОМАШНЯЯ ТОЧКА НЕ ЗАПИСАНА → выполняем поведение команды LAND
+              RCLCPP_WARN(this->get_logger(), "🏠 No home coordinates! Executing LAND maneuver instead.");
+
+              // === Повторяем логику из land_command (с speed) ===
+              double land_speed = 1.0; // Значение по умолчанию
+              // Если хотите — можно вынести в параметр: this->get_parameter("land.default_speed", land_speed);
+
+              RCLCPP_INFO(this->get_logger(), "🛬 Executing emergency LAND with speed: %.2f m/s", land_speed);
+
               px4_msgs::msg::VehicleCommand cmd;
-              cmd.command = 21; // MAV_CMD_NAV_LAND
-              cmd.param1 = 0.0;
+              cmd.command = 21;                            // MAV_CMD_NAV_LAND
+              cmd.param7 = static_cast<float>(land_speed); // Вертикальная скорость снижения, м/с
               cmd.target_system = 1;
               cmd.target_component = 1;
               cmd.from_external = true;
               cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
               vehicle_cmd_pub_->publish(cmd);
+
+              // Также сбрасываем флаги и режим
+              active_command_ = ActiveCommand::LAND;
+              active_command_param_ = land_speed;
             }
             return hd;
           },
@@ -772,7 +802,7 @@ namespace los_guidance
   {
     if (!msg)
       return;
-    
+
     std::lock_guard<std::mutex> lock(state_mutex_);
 
     if (use_uart_gps_)
@@ -788,7 +818,7 @@ namespace los_guidance
     else
     {
       // 1. Сохраняем в state_mutex_ (потокобезопасно)
-      
+
       // RCLCPP_INFO(this->get_logger(), "GPS messsage Subscribers vehicleGlobalPositionCallback");
       drone_gps_.lat = msg->lat;
       drone_gps_.lon = msg->lon;
@@ -817,7 +847,6 @@ namespace los_guidance
   {
     GpsData uart_data = uart_gps_parser_.getData();
 
-    
     if (uart_data.is_valid)
     {
       RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
@@ -825,8 +854,6 @@ namespace los_guidance
                             uart_data.latitude, uart_data.longitude, uart_data.altitude,
                             uart_data.satellites);
       {
-
-
 
         // RCLCPP_INFO(this->get_logger(), "GPS messsage Subscribers uartGpsCallback");
 
@@ -891,8 +918,8 @@ namespace los_guidance
     }
 
     // insertion for test
-    quat_ready = true;
-    gyro_ready = true;
+    // quat_ready = true;
+    // gyro_ready = true;
 
     // RCLCPP_INFO(this->get_logger(), "   quat_ready=%d, gyro_ready=%d", quat_ready, gyro_ready);
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms, "   quat_ready=%d, gyro_ready=%d", quat_ready, gyro_ready);
@@ -1309,24 +1336,23 @@ namespace los_guidance
         ref_gps_.alt = drone_gps_.alt;
         ref_gps_valid_ = true;
         // RCLCPP_INFO(this->get_logger(), "📍 Reference GPS set: %.6f, %.6f, %.2f", ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
-        
+
         RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
-                            "📡 UART GPS: %.6f, %.6f, %.2f ",
-                            drone_gps_.lat, drone_gps_.lon, drone_gps_.alt);
+                              "📡 UART GPS: %.6f, %.6f, %.2f ",
+                              drone_gps_.lat, drone_gps_.lon, drone_gps_.alt);
       }
-      
 
       if (ref_gps_valid_)
       {
         // Конвертируем цель в локальные NED-координаты относительно точки взлёта
         target_ned_ = gpsToNed(target_gps_.lat, target_gps_.lon, target_gps_.alt,
                                ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
-                               
+
         // RCLCPP_INFO(this->get_logger(), "📍 Reference GPS get to ned: %.6f, %.6f, %.2f", ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
-        
+
         RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
-                            "📡 Reference GPS: %.6f, %.6f, %.2f",
-                            drone_gps_.lat, drone_gps_.lon, drone_gps_.alt);
+                              "📡 Reference GPS: %.6f, %.6f, %.2f",
+                              drone_gps_.lat, drone_gps_.lon, drone_gps_.alt);
       }
 
       bool camera_locked = attack_ready_.load(std::memory_order_acquire);
@@ -1345,14 +1371,19 @@ namespace los_guidance
                            phase_name.c_str(), current_dist, camera_locked ? "LOCKED" : "SEARCHING");
 
       static int poll_counter = 0;
-      if (++poll_counter >= 250)
+      if (++poll_counter >= 2250)
       {
         poll_counter = 0;
 
         // 🆕 Если цели нет (hover mode) — опрашиваем ВСЕ цели в поисках рабочей
         if (closest_target_ip_.empty() && !commander_targets_.empty())
         {
-          RCLCPP_INFO(this->get_logger(), "🔍 Scanning all targets for available target...");
+          // RCLCPP_INFO(this->get_logger(), "🔍 Scanning all targets for available target...");
+
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                               "🔍 Scanning all targets... | count=%zu | port=%d",
+                               commander_targets_.size(), target_query_port_);
+
           std::string found_ip;
           double found_lat = 0, found_lon = 0, found_alt = 0;
           double my_lat = 0;
@@ -1368,6 +1399,10 @@ namespace los_guidance
           {
             double t_lat, t_lon, t_alt;
             int t_sats;
+
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                 "🔍 Scanning target: %s", ip.c_str());
+
             if (queryTargetGPS(ip, target_query_port_, t_lat, t_lon, t_alt, t_sats))
             {
               RCLCPP_INFO(this->get_logger(), "✅ Found available target: %s", ip.c_str());
@@ -1410,6 +1445,22 @@ namespace los_guidance
         }
       }
 
+      // 🔍 Отладочный вывод: текущая цель (IP и координаты)
+      if (!closest_target_ip_.empty())
+      {
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "📍 Current target: IP=%s | GPS: %.6f, %.6f, %.2f m",
+                             closest_target_ip_.c_str(),
+                             target_gps_.lat,
+                             target_gps_.lon,
+                             target_gps_.alt);
+      }
+      else
+      {
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "📍 No active target selected (closest_target_ip_ is empty)");
+      }
+
       // Условие перехода в атаку: камера видит цель И расстояние < 200м
       if (camera_locked) // && current_dist < 200.0 // потом добавил условие на дистанцию
       {
@@ -1431,44 +1482,75 @@ namespace los_guidance
       }
     }
 
-    // === ФАЗА 2: ВИЗУАЛЬНАЯ АТАКА (LOS Guidance) ===
+    // === ФАЗА 2.5: ВИЗУАЛЬНЫЙ ПОИСК (Yaw Tracking + Hover) ===
 
     // === ФАЗА 2.5: ВИЗУАЛЬНЫЙ ПОИСК (Yaw Tracking + Hover) ===
     if (auto_phase_ == AutoPhase::VISUAL_SEARCH)
     {
       vehicle_ctrl_->publishOffboardControlMode();
-      bool target_seen = attack_ready_.load(std::memory_order_acquire);
 
-      if (target_seen && start_attack_)
+      // === 1. Обновляем состояние: видим ли цель? ===
+      bool target_seen = attack_ready_.load(std::memory_order_acquire);
+      std::lock_guard<std::mutex> lock(state_mutex_);
+
+      // === 2. Публикуем setpoint: зависание на месте + yaw control ===
+      if (drone_gps_.is_valid && ref_gps_valid_)
       {
-        auto_phase_ = AutoPhase::VISUAL_ATTACK;
-        RCLCPP_INFO(this->get_logger(), "🚀 Switching from SEARCH to VISUAL ATTACK");
-      }
-      else
-      {
+        // Конвертируем текущую позицию в NED (для зависания)
+        Eigen::Vector3d hover_ned = gpsToNed(
+            drone_gps_.lat, drone_gps_.lon, drone_gps_.alt,
+            ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+
+        // Yaw rate: вращаемся, чтобы держать цель в центре
         double yaw_rate_cmd = 0.0;
         if (target_seen)
         {
           yaw_rate_cmd = -config_.kp_yaw_track * last_los_cam_y_.load(std::memory_order_relaxed);
-          double max_yaw_rate = 30.0 * DEG2RAD;
-          yaw_rate_cmd = std::clamp(yaw_rate_cmd, -max_yaw_rate, max_yaw_rate);
+          yaw_rate_cmd = std::clamp(yaw_rate_cmd, -30.0 * DEG2RAD, 30.0 * DEG2RAD);
         }
 
+        // Публикуем setpoint
         px4_msgs::msg::TrajectorySetpoint msg;
-        msg.position = {NAN, NAN, NAN};
+        msg.position = {static_cast<float>(hover_ned.x()), static_cast<float>(hover_ned.y()), static_cast<float>(hover_ned.z())};
         msg.velocity = {NAN, NAN, NAN};
         msg.acceleration = {NAN, NAN, NAN};
         msg.yaw = NAN;
         msg.yawspeed = static_cast<float>(yaw_rate_cmd);
         msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+
         trajectory_setpoint_pub_->publish(msg);
+
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                             "🔍 SEARCH: yaw_rate=%.1f deg/s, target=%s",
-                             yaw_rate_cmd * 180.0 / M_PI, target_seen ? "LOCKED" : "SCANNING");
-        return;
+                             "🔍 SEARCH: hover at (%.2f, %.2f, %.2f) | yaw_rate=%.1f°/s | target=%s",
+                             hover_ned.x(), hover_ned.y(), hover_ned.z(),
+                             yaw_rate_cmd * 180.0 / M_PI,
+                             target_seen ? "TRACKING" : "SCANNING");
       }
+      else
+      {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "⚠️ GPS not valid in SEARCH mode — cannot hover");
+      }
+
+      // === 3. 🔥 КЛЮЧЕВОЕ: Переход в атаку ТОЛЬКО по команде '{"start_attack": true}' ===
+      if (target_seen && start_attack_) // теперь start_attack_ управляет переходом
+      {
+        RCLCPP_INFO(this->get_logger(), "🎯 'start_attack' received and target seen → switching to VISUAL_ATTACK");
+        auto_phase_ = AutoPhase::VISUAL_ATTACK;
+        attack_enabled_ = true;
+        // ❗ Не вызываем guidance_ctrl_->setAttackMode(true) здесь — пусть будет в timer callback
+      }
+      else if (target_seen && !start_attack_)
+      {
+        // Цель видна, но атака не разрешена → продолжаем слежение
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "👀 Target detected but 'start_attack' not received — continuing to track");
+      }
+
+      return; // ❗️ Выходим — больше ничего не делаем
     }
 
+    // === ФАЗА 2: ВИЗУАЛЬНАЯ АТАКА (LOS Guidance) ===
     if (auto_phase_ == AutoPhase::VISUAL_ATTACK)
     {
       if (!attack_ready_.load(std::memory_order_acquire))
@@ -1738,16 +1820,14 @@ namespace los_guidance
 
       case ActiveCommand::HOLD_TO_SQUARE:
       {
-        // Удержание позиции в квадрате NxNxN метров
-        double square_size = active_command_param_;
+        double square_size = active_command_param_; // напр. 20 м
+        double half_size = square_size / 2.0;       // ±10 м
 
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                             "⏸️ HOLD_TO_SQUARE: %.1f m", square_size);
+                             "⏸️ HOLD_TO_SQUARE: drifting within %.1f m", half_size);
 
         if (drone_gps_.is_valid)
         {
-          // Квадрат: дрейф в пределах square_size метров от начальной точки
-          // Используем текущую позицию как центр удержания
           if (!ref_gps_valid_)
           {
             ref_gps_.lat = drone_gps_.lat;
@@ -1756,10 +1836,28 @@ namespace los_guidance
             ref_gps_valid_ = true;
           }
 
-          // Удержание текущей позиции (hover)
-          Eigen::Vector3d hover_ned = gpsToNed(drone_gps_.lat, drone_gps_.lon, drone_gps_.alt,
-                                               ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
-          vehicle_ctrl_->publishPositionSetpoint(hover_ned);
+          // Генерируем случайные смещения в пределах квадрата
+          static std::random_device rd;
+          static std::mt19937 gen(rd());
+          static std::uniform_real_distribution<double> dis(-half_size, half_size);
+
+          double offset_x = dis(gen);
+          double offset_y = dis(gen);
+
+          // Базовая позиция — текущая в NED
+          Eigen::Vector3d center_ned = gpsToNed(
+              drone_gps_.lat, drone_gps_.lon, drone_gps_.alt,
+              ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+
+          Eigen::Vector3d target_ned = center_ned;
+          target_ned.x() += offset_x;
+          target_ned.y() += offset_y;
+
+          vehicle_ctrl_->publishPositionSetpoint(target_ned);
+
+          RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                "🎯 Drift target: offset=(%.1f, %.1f), NED=(%.2f, %.2f, %.2f)",
+                                offset_x, offset_y, target_ned.x(), target_ned.y(), target_ned.z());
         }
         break;
       }
@@ -2042,15 +2140,6 @@ namespace los_guidance
     }
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    // 3. Takeoff — читаем параметры из YAML
-    this->declare_parameter("takeoff.target_altitude_m", 31.0);
-    this->declare_parameter("takeoff.climb_rate_mps", -3.0);
-    this->declare_parameter("takeoff.altitude_threshold_m", 1.5);
-    this->declare_parameter("takeoff.min_altitude_already_flying_m", 2.0);
-    this->declare_parameter("takeoff.min_cycles_for_already_flying", 20);
-    this->declare_parameter("takeoff.skip", false);   // 🆕 Пропуск этапа взлёта
-    this->declare_parameter("takeoff.timeout_s", 20); // 🆕 Таймаут взлёта (секунды)
-
     bool skip_takeoff = this->get_parameter("takeoff.skip").as_bool();
     int takeoff_timeout_s = this->get_parameter("takeoff.timeout_s").as_int();
 
@@ -2305,8 +2394,7 @@ namespace los_guidance
     RCLCPP_WARN(this->get_logger(), "step 2");
 
     // 🆕 Визуальный поиск цели после взлёта (висим на месте, ждём обнаружения камерой)
-    this->declare_parameter("takeoff.visual_searching", false);
-    this->declare_parameter("takeoff.visual_search_timeout_s", 300); // 5 минут по умолчанию
+
     bool visual_searching = this->get_parameter("takeoff.visual_searching").as_bool();
     int visual_search_timeout_s = this->get_parameter("takeoff.visual_search_timeout_s").as_int();
 
@@ -2544,14 +2632,6 @@ namespace los_guidance
       return;
     }
 
-    // === Параметры взлета из YAML ===
-    this->declare_parameter("takeoff.target_altitude_m", 31.0);
-    this->declare_parameter("takeoff.climb_rate_mps", -3.0);
-    this->declare_parameter("takeoff.altitude_threshold_m", 1.5);
-    this->declare_parameter("takeoff.min_altitude_already_flying_m", 2.0);
-    this->declare_parameter("takeoff.min_cycles_for_already_flying", 20);
-    this->declare_parameter("takeoff.timeout_s", 20);
-
     float target_z = -static_cast<float>(this->get_parameter("takeoff.target_altitude_m").as_double());
     float vz = static_cast<float>(this->get_parameter("takeoff.climb_rate_mps").as_double());
     float altitude_threshold = static_cast<float>(this->get_parameter("takeoff.altitude_threshold_m").as_double());
@@ -2665,11 +2745,11 @@ namespace los_guidance
 
   void Node::executeSearchMode()
   {
+    RCLCPP_INFO(this->get_logger(), "🔍 Starting SEARCH mode sequence: hover + yaw tracking (awaiting 'start_attack')");
 
-    RCLCPP_INFO(this->get_logger(), "🚀 Starting AUTO mode sequence...");
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-    // Сохраняем точку взлёта как NED-начало координат
+    // === 1. Сохраняем точку взлёта ===
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       if (drone_gps_.is_valid)
@@ -2678,16 +2758,22 @@ namespace los_guidance
         start_lon_ = drone_gps_.lon;
         start_alt_ = drone_gps_.alt;
         start_gps_valid_ = true;
+        RCLCPP_INFO(this->get_logger(), "🏠 Start position saved: %.6f, %.6f, %.2f",
+                    start_lat_, start_lon_, start_alt_);
+      }
+      else
+      {
+        RCLCPP_WARN(this->get_logger(), "⚠️ GPS not valid — will wait for fix");
       }
     }
 
-    // 1. Arm
+    // === 2. Arm ===
     sendArmCommand(true);
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    // 2. Offboard Mode
-    RCLCPP_INFO(this->get_logger(), "📻 Switching to OFFBOARD...");
-    for (int i = 0; i < 10; i++)
+    // === 3. OFFBOARD режим ===
+    RCLCPP_INFO(this->get_logger(), "📡 Switching to OFFBOARD mode...");
+    for (int i = 0; i < 10; ++i)
     {
       vehicle_ctrl_->setOffboardMode();
       vehicle_ctrl_->publishOffboardControlMode();
@@ -2695,52 +2781,53 @@ namespace los_guidance
     }
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    // 3. Read Skip Parameter
-    this->declare_parameter("takeoff.skip", false);
+    // === 4. Пропуск взлёта? ===
     bool skip_takeoff = this->get_parameter("takeoff.skip").as_bool();
+    RCLCPP_INFO(this->get_logger(), "🔧 Takeoff skip: %s", skip_takeoff ? "YES" : "NO");
 
-    RCLCPP_INFO(this->get_logger(), "🔧 Takeoff skip: %s", skip_takeoff ? "TRUE" : "FALSE");
-
-    // 4. Execute Takeoff Logic (выносим в отдельный метод)
+    // === 5. Выполняем взлёт (синхронно) ===
     executeTakeoffSequence(skip_takeoff);
 
-    // 5. Post-Takeoff Initialization
-    RCLCPP_WARN(this->get_logger(), "step 1");
+    // === 6. Ждём валидности ref_gps_ для NED ===
+    RCLCPP_INFO(this->get_logger(), "⏳ Waiting for ref_gps_ to be valid...");
+    auto wait_start = std::chrono::steady_clock::now();
+    while (!ref_gps_valid_ && (std::chrono::steady_clock::now() - wait_start) < std::chrono::seconds(5))
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
 
-    // Установка ref_gps_, если еще не установлено (на случай skip_takeoff=true или ошибок)
+    if (!ref_gps_valid_)
+    {
+      RCLCPP_ERROR(this->get_logger(), "❌ ref_gps_ not valid — cannot start SEARCH");
+      return;
+    }
+
+    // === 7. Устанавливаем позицию зависания: текущая GPS ===
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
-      if (!ref_gps_valid_ && drone_gps_.is_valid)
+      if (!drone_gps_.is_valid)
       {
-        ref_gps_.lat = drone_gps_.lat;
-        ref_gps_.lon = drone_gps_.lon;
-        ref_gps_.alt = drone_gps_.alt;
-        ref_gps_valid_ = true;
-        RCLCPP_INFO(this->get_logger(), "📍 Reference GPS set before poll 22 executeSearchMode: %.6f, %.6f, %.2f",
-                    ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+        RCLCPP_ERROR(this->get_logger(), "❌ Drone GPS invalid — cannot hover");
+        return;
       }
-    }
-    RCLCPP_WARN(this->get_logger(), "step 2");
 
-    RCLCPP_INFO(this->get_logger(), "🔍 Starting SEARCH mode...");
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    auto_phase_ = AutoPhase::VISUAL_SEARCH;
-    start_attack_ = false;
-    attack_enabled_ = false;
-    attack_ready_.store(false, std::memory_order_release);
-    guidance_ctrl_->reset();
-    if (drone_gps_.is_valid)
-    {
       target_gps_ = {drone_gps_.lat, drone_gps_.lon, drone_gps_.alt};
-      if (!ref_gps_valid_)
-      {
-        ref_gps_.lat = drone_gps_.lat;
-        ref_gps_.lon = drone_gps_.lon;
-        ref_gps_.alt = drone_gps_.alt;
-        ref_gps_valid_ = true;
-      }
+      RCLCPP_INFO(this->get_logger(), "📍 Hover target set: %.6f, %.6f, %.2f",
+                  target_gps_.lat, target_gps_.lon, target_gps_.alt);
     }
-    RCLCPP_INFO(this->get_logger(), "✅ SEARCH mode active. Hovering & tracking target if detected.");
+
+    // === 8. Включаем режим VISUAL_SEARCH — НЕ АТАКУЕТ, только слежение ===
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      auto_phase_ = AutoPhase::VISUAL_SEARCH;
+      start_attack_ = false;   // ❌ Не включаем атаку
+      attack_enabled_ = false; // ❌
+      attack_ready_.store(false, std::memory_order_release);
+      guidance_ctrl_->reset();
+    }
+
+    RCLCPP_INFO(this->get_logger(), "✅ SEARCH mode ACTIVE: hovering and yaw-tracking. Awaiting 'start_attack' command.");
+    RCLCPP_INFO(this->get_logger(), "💡 Tip: Send {\"start_attack\": true} to begin attack.");
   }
 
   void Node::declareCommonParameters()
@@ -2769,6 +2856,26 @@ namespace los_guidance
 
     /*=== Параметры поиска/search режим ===*/
     // this->declare_parameter<double>("search.kp_yaw_track", 0.5);
+
+    // === Параметры взлета из YAML ===
+    // this->declare_parameter("takeoff.target_altitude_m", 91.0);
+    // this->declare_parameter("takeoff.climb_rate_mps", -3.0);
+    // this->declare_parameter("takeoff.altitude_threshold_m", 1.5);
+    // this->declare_parameter("takeoff.min_altitude_already_flying_m", 2.0);
+    // this->declare_parameter("takeoff.min_cycles_for_already_flying", 20);
+    // this->declare_parameter("takeoff.timeout_s", 20);
+
+    // из части 3. Takeoff — читаем параметры из YAML
+    this->declare_parameter("takeoff.target_altitude_m", 91.0);
+    this->declare_parameter("takeoff.climb_rate_mps", -3.0);
+    this->declare_parameter("takeoff.altitude_threshold_m", 1.5);
+    this->declare_parameter("takeoff.min_altitude_already_flying_m", 2.0);
+    this->declare_parameter("takeoff.min_cycles_for_already_flying", 20);
+    this->declare_parameter("takeoff.skip", false);   // 🆕 Пропуск этапа взлёта
+    this->declare_parameter("takeoff.timeout_s", 20); // 🆕 Таймаут взлёта (секунды)
+
+    this->declare_parameter("takeoff.visual_searching", false);
+    this->declare_parameter("takeoff.visual_search_timeout_s", 300); // 5 минут по умолчанию
 
     RCLCPP_DEBUG(this->get_logger(), "✓ All parameters declared successfully");
   }

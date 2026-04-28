@@ -24,7 +24,7 @@
 #include <atomic>
 #include <optional>
 
-
+#include <random>
 // === Сетевые заголовки (для TCP клиента/сервера) ===
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -414,7 +414,7 @@ bool update_acc_setpoint_{false};
     static constexpr double DEG2RAD = M_PI / 180.0;    ///< Градусы → Радианы
 
     std::vector<std::string> commander_targets_;
-    int target_query_port_{11471};
+    int target_query_port_{11472};
 
     // === преследование цели ===
     enum class AutoPhase
