@@ -119,6 +119,9 @@ namespace los_guidance
     this->declare_parameter("guidance.enable_acceleration_parallel", false);
     this->declare_parameter("kalman.use_gyro_compensation", false);
     this->declare_parameter("sync.debug", false);
+    // Дистанция для перехода в визуальную атаку
+    this->declare_parameter("attack.max_approach_distance_m", 200.0);
+    config_.max_approach_distance = this->get_parameter("attack.max_approach_distance_m").as_double();
 
     config_.enable_PI_control = this->get_parameter("guidance.enable_PI_control").as_bool();
     config_.top_attack_enable = this->get_parameter("guidance.top_attack_mode").as_bool();
@@ -819,7 +822,7 @@ namespace los_guidance
     {
       // 1. Сохраняем в state_mutex_ (потокобезопасно)
 
-      // RCLCPP_INFO(this->get_logger(), "GPS messsage Subscribers vehicleGlobalPositionCallback");
+      // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 9000, "GPS messsage Subscribers vehicleGlobalPositionCallback");
       drone_gps_.lat = msg->lat;
       drone_gps_.lon = msg->lon;
       drone_gps_.alt = msg->alt;
@@ -855,7 +858,7 @@ namespace los_guidance
                             uart_data.satellites);
       {
 
-        // RCLCPP_INFO(this->get_logger(), "GPS messsage Subscribers uartGpsCallback");
+        // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 9000, "GPS messsage Subscribers uartGpsCallback");
 
         std::lock_guard<std::mutex> lock(state_mutex_);
 
@@ -1327,7 +1330,7 @@ namespace los_guidance
     // === ФАЗА 1: СБЛИЖЕНИЕ ПО GPS ===
     if (auto_phase_ == AutoPhase::GPS_APPROACH)
     {
-      RCLCPP_INFO(this->get_logger(), "GPS messsage Subscribers controlLoopTimerCallback");
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 9000, "GPS messsage Subscribers controlLoopTimerCallback");
       // 🆕 Инициализируем ref_gps_ при первом входе (если ещё не установлен)
       if (!ref_gps_valid_ && drone_gps_.is_valid)
       {
@@ -1462,7 +1465,7 @@ namespace los_guidance
       }
 
       // Условие перехода в атаку: камера видит цель И расстояние < 200м
-      if (camera_locked) // && current_dist < 200.0 // потом добавил условие на дистанцию
+      if (camera_locked && current_dist < config_.max_approach_distance) // && current_dist < 200.0 // потом добавил условие на дистанцию
       {
         auto_phase_ = AutoPhase::VISUAL_ATTACK;
         start_attack_ = true;
@@ -1474,7 +1477,12 @@ namespace los_guidance
       {
         // Продолжаем лететь по GPS
         vehicle_ctrl_->publishOffboardControlMode();
-        vehicle_ctrl_->publishPositionSetpoint(target_ned_);
+        // vehicle_ctrl_->publishPositionSetpoint(target_ned_);
+        vehicle_ctrl_->publishPositionSetpoint(target_ned_,
+            Eigen::Vector3d{5.0, 0.0, 0.0},   // скорость
+            Eigen::Vector3d{0.2, 0.0, 0.0}    // ускорение);
+        );
+
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                              "🚁 Approaching... Dist: %.1fm | Camera: %s",
                              current_dist, camera_locked ? "LOCKED" : "SEARCHING");
@@ -1813,7 +1821,8 @@ namespace los_guidance
             ref_gps_valid_ = true;
           }
 
-          vehicle_ctrl_->publishPositionSetpoint(target_pos);
+          vehicle_ctrl_->publishPositionSetpoint(target_pos,
+    Eigen::Vector3d{0.5, 0.0, 0.0} );
         }
         break;
       }
@@ -1853,7 +1862,8 @@ namespace los_guidance
           target_ned.x() += offset_x;
           target_ned.y() += offset_y;
 
-          vehicle_ctrl_->publishPositionSetpoint(target_ned);
+          vehicle_ctrl_->publishPositionSetpoint(target_ned,
+    Eigen::Vector3d{0.5, 0.0, 0.0} );
 
           RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                                 "🎯 Drift target: offset=(%.1f, %.1f), NED=(%.2f, %.2f, %.2f)",
@@ -2049,7 +2059,19 @@ namespace los_guidance
     out_lon = findVal("\"lon\"");
     out_alt = findVal("\"alt\"");
     out_sats = (int)findVal("\"sats\"");
-    return (out_sats > 0 && std::abs(out_lat) > 1e-3);
+
+    //v1 with sats
+    //return (out_sats > 0 && std::abs(out_lat) > 1e-3);
+
+    //v2
+    // std::string response(buf);
+    // bool has_sats = response.find("\"sats\"") != std::string::npos;
+    // if (has_sats && out_sats <= 0) return false;
+    // return std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3;
+
+    //v3
+    bool has_valid_coords = (std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3);
+    return has_valid_coords;
   }
 
   // === Основная авто-последовательность ===
@@ -2509,7 +2531,8 @@ namespace los_guidance
             Eigen::Vector3d hover_ned = gpsToNed(
                 drone_gps_.lat, drone_gps_.lon, drone_gps_.alt,
                 ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
-            vehicle_ctrl_->publishPositionSetpoint(hover_ned);
+            vehicle_ctrl_->publishPositionSetpoint(hover_ned,
+    Eigen::Vector3d{0.5, 0.0, 0.0} );
           }
         }
         vehicle_ctrl_->publishOffboardControlMode();

@@ -1,5 +1,7 @@
 los_guidance_node:
   ros__parameters:
+    attack:
+      max_approach_distance_m: 5.0  # 200.0
     gps:
       source: "uart"   # Меняйте на "uart", чтобы использовать внешний GPS
     uart_gps:
@@ -9,12 +11,12 @@ los_guidance_node:
     logging:
       throttle_interval_ms: 136000
     takeoff:
-      climb_rate_mps: -3.0  # 10 м/с
+      climb_rate_mps: -1.0  # 10 м/с
       target_altitude_m: 80.0 
       altitude_threshold_m: 1.5 
       min_altitude_already_flying_m: 2.0 
       min_cycles_for_already_flying: 120 
-      skip: false                    # Пропуск взлёта
+      skip: true                    # Пропуск взлёта
       visual_searching: true         # 🔍 Визуальный поиск после взлёта
       visual_search_timeout_s: 300   # ⏰ 5 минут ожидания
       timeout_s: 20
@@ -136,5 +138,5 @@ los_guidance_node:
     commander:
       enable: true
       port: 11472
-      targets: ["192.168.14.169", "192.168.14.203", "192.168.14.175"] # если лист пустой... какая логика?
+      targets: ["192.168.14.169", "192.168.14.175", "192.168.14.163"] # если лист пустой... какая логика?
       target_port: 11472  # Порт, на котором цели слушают запросы SHOWGPS //11471 было

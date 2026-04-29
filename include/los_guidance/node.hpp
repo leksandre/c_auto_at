@@ -161,7 +161,8 @@ namespace los_guidance
 
     // Takeoff параметры
     int takeoff_timeout_s{20};
-double kp_yaw_track{0.5};  // 🆕
+  double kp_yaw_track{0.5};  // 🆕
+  double max_approach_distance{200.0};  ///< Максимальное расстояние для перехода в визуальную атаку (м)
   };
 
   /**
