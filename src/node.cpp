@@ -1499,7 +1499,7 @@ namespace los_guidance
         // vehicle_ctrl_->publishPositionSetpoint(target_ned_);
         vehicle_ctrl_->publishPositionSetpoint(target_ned_,
                                                Eigen::Vector3d{7.0, 0.0, 0.0}, // скорость
-                                               Eigen::Vector3d{0.3, 0.0, 0.0}  // ускорение);
+                                               Eigen::Vector3d{2.5, 0.0, 0.0}  // ускорение);
         );
 
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
@@ -1841,7 +1841,7 @@ namespace los_guidance
           }
 
           vehicle_ctrl_->publishPositionSetpoint(target_pos,
-                                                 Eigen::Vector3d{0.5, 0.0, 0.0});
+                                                 Eigen::Vector3d{2.5, 0.0, 0.0},Eigen::Vector3d{0.1, 0.0, 0.0});
         }
         break;
       }
@@ -1882,7 +1882,7 @@ namespace los_guidance
           target_ned.y() += offset_y;
 
           vehicle_ctrl_->publishPositionSetpoint(target_ned,
-                                                 Eigen::Vector3d{0.5, 0.0, 0.0});
+                                                 Eigen::Vector3d{2.5, 0.0, 0.0},Eigen::Vector3d{0.1, 0.0, 0.0});
 
           RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                                 "🎯 Drift target: offset=(%.1f, %.1f), NED=(%.2f, %.2f, %.2f)",
@@ -2700,7 +2700,7 @@ namespace los_guidance
                 drone_gps_.lat, drone_gps_.lon, drone_gps_.alt,
                 ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
             vehicle_ctrl_->publishPositionSetpoint(hover_ned,
-                                                   Eigen::Vector3d{0.5, 0.0, 0.0});
+                                                   Eigen::Vector3d{2.5, 0.0, 0.0},Eigen::Vector3d{0.1, 0.0, 0.0});
           }
         }
         vehicle_ctrl_->publishOffboardControlMode();
