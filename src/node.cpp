@@ -2607,7 +2607,16 @@ namespace los_guidance
     }
     else
     {
-      for (int i = 0; i < 1200; i++)
+
+
+
+      Eigen::Vector3d approach_velocity{5.0, 0.0, 0.0};  // пример значений
+      Eigen::Vector3d approach_acceleration{1.2, 0.0, 0.0};
+      constexpr double BOOST_SPEED_MAX = 15.0;  // константа // Макс. скорость при рывке [м/с]
+      // constexpr double turbo_start_dist = 100.0;
+      // constexpr double turbo_end_dist = 30.0;
+
+      for (int i = 0; i < 100; i++)
       {
         // Вычисление желаемого yaw (угол от дрона к цели)
         double target_yaw = NAN;
@@ -2624,16 +2633,141 @@ namespace los_guidance
         msg.position = {static_cast<float>(target_ned_.x()),
                         static_cast<float>(target_ned_.y()),
                         static_cast<float>(target_ned_.z())};
-        msg.velocity = {static_cast<float>(approach_velocity.x()),
-                        static_cast<float>(approach_velocity.y()),
-                        static_cast<float>(approach_velocity.z())};
-        msg.acceleration = {static_cast<float>(approach_acceleration.x()),
-                            static_cast<float>(approach_acceleration.y()),
-                            static_cast<float>(approach_acceleration.z())};
+msg.velocity[0] = static_cast<float>(approach_velocity.x());
+msg.velocity[1] = static_cast<float>(approach_velocity.y());
+msg.velocity[2] = static_cast<float>(approach_velocity.z());
+        msg.acceleration[0] = static_cast<float>(approach_acceleration.x());
+msg.acceleration[1] = static_cast<float>(approach_acceleration.y());
+msg.acceleration[2] = static_cast<float>(approach_acceleration.z());
         msg.yaw = std::isnan(target_yaw) ? NAN : static_cast<float>(target_yaw);
         msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
         trajectory_setpoint_pub_->publish(msg);
       }
+
+
+
+      // === Плавный турбо-режим (ramp-up acceleration) ===
+      double turbo_start_distF = 30.0;  // Начать ускорение с 30м
+      double turbo_end_distF = 5.0;     // Закончить на 5м
+
+      if (min_dist <= turbo_start_distF && min_dist >= turbo_end_distF)
+      {
+          // Коэффициент усиления: 1.0 → 3.0 по мере сближения
+          double turbo_factor = 1.0 + 2.0 * (turbo_start_distF - min_dist) / 
+                                (turbo_start_distF - turbo_end_distF);
+          
+Eigen::Vector3d dir_to_target(target_ned_.x(), target_ned_.y(), 0.0);
+dir_to_target.normalize();
+          
+          // Плавно наращиваем ускорение
+          Eigen::Vector3d turbo_acceleration = dir_to_target * 
+              (guidance_config_.max_lat_acc * turbo_factor);
+          
+          // Ограничение по скорости
+          double turbo_speed = std::min(
+             (guidance_config_.max_vc * 0.5) * turbo_factor,
+              BOOST_SPEED_MAX
+          );
+          Eigen::Vector3d turbo_velocity = dir_to_target * turbo_speed;
+          
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+              "⚡ Turbo mode: factor=%.1f | acc=%.2f | speed=%.1f",
+              turbo_factor, turbo_acceleration.norm(), turbo_speed);
+          
+          // Публикация (в основном цикле, не в отдельном while)
+          px4_msgs::msg::TrajectorySetpoint msg;
+          msg.position = {static_cast<float>(target_ned_.x()),
+                          static_cast<float>(target_ned_.y()),
+                          static_cast<float>(target_ned_.z())};
+          msg.velocity = {static_cast<float>(turbo_velocity.x()),
+                          static_cast<float>(turbo_velocity.y()),
+                          static_cast<float>(turbo_velocity.z())};
+          msg.acceleration = {static_cast<float>(turbo_acceleration.x()),
+                              static_cast<float>(turbo_acceleration.y()),
+                              static_cast<float>(turbo_acceleration.z())};
+          msg.yaw = std::atan2(target_ned_.y(), target_ned_.x());
+          msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+          trajectory_setpoint_pub_->publish(msg);
+      }
+
+
+
+      // === ФАЗА: МОЩНЫЙ РЫВОК К ЦЕЛИ (Sprint Boost) ===
+      // Параметры рывка (можно вынести в params.yaml)
+      constexpr double BOOST_DURATION_SEC = 3.0;      // Длительность рывка [с]
+      constexpr double BOOST_ACCEL_FACTOR = 3.0;      // Множитель ускорения (×3 от обычного)
+
+      constexpr double MIN_BOOST_DIST = 10.0;         // Мин. дистанция для запуска рывка [м]
+      constexpr double MAX_BOOST_DIST = 50.0;         // Макс. дистанция для запуска рывка [м]
+
+      // Проверяем условия для рывка
+      double current_dist = std::sqrt(
+          target_ned_.x() * target_ned_.x() + 
+          target_ned_.y() * target_ned_.y()
+      );
+
+      if (current_dist >= MIN_BOOST_DIST && current_dist <= MAX_BOOST_DIST)
+      {
+          // 🚀 Вычисляем единичный вектор направления к цели
+Eigen::Vector3d dir_to_target(target_ned_.x(), target_ned_.y(), 0.0);
+dir_to_target.normalize(); // Горизонтальный рывок (без изменения высоты)
+          
+          // 🚀 Усиленное ускорение в направлении цели
+          Eigen::Vector3d boost_acceleration = dir_to_target * 
+              (guidance_config_.max_lat_acc * BOOST_ACCEL_FACTOR);
+          
+          // 🚀 Высокая скорость сближения
+          Eigen::Vector3d boost_velocity = dir_to_target * BOOST_SPEED_MAX;
+          
+          RCLCPP_INFO(this->get_logger(), 
+              "🚀 BOOST ENGAGED! Dist: %.1fm | Acc: %.2f m/s² | Speed: %.1f m/s",
+              current_dist, boost_acceleration.norm(), boost_velocity.norm());
+          
+          // 🚀 Публикуем setpoint с рывком (ограничено по времени)
+          auto boost_start = this->get_clock()->now();
+          while ((this->get_clock()->now() - boost_start).seconds() < BOOST_DURATION_SEC)
+          {
+              // Проверка: не достигли ли цель
+              double new_dist = std::sqrt(
+                  target_ned_.x() * target_ned_.x() + 
+                  target_ned_.y() * target_ned_.y()
+              );
+              if (new_dist < 2.0) break;  // Остановка при сближении < 2м
+              
+              // Вычисление yaw для ориентации носом к цели
+              double target_yaw = std::atan2(target_ned_.y(), target_ned_.x());
+              
+              px4_msgs::msg::TrajectorySetpoint msg;
+              msg.position = {
+                  static_cast<float>(target_ned_.x()),
+                  static_cast<float>(target_ned_.y()),
+                  static_cast<float>(target_ned_.z())
+              };
+              msg.velocity = {
+                  static_cast<float>(boost_velocity.x()),
+                  static_cast<float>(boost_velocity.y()),
+                  static_cast<float>(boost_velocity.z())
+              };
+              msg.acceleration = {
+                  static_cast<float>(boost_acceleration.x()),
+                  static_cast<float>(boost_acceleration.y()),
+                  static_cast<float>(boost_acceleration.z())
+              };
+              msg.yaw = static_cast<float>(target_yaw);
+              msg.yawspeed = NAN;
+              msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+              
+              trajectory_setpoint_pub_->publish(msg);
+              vehicle_ctrl_->publishOffboardControlMode();
+              
+              // Короткий сон для стабильности цикла
+              rclcpp::sleep_for(std::chrono::milliseconds(20));
+          }
+          
+          RCLCPP_INFO(this->get_logger(), "✅ Boost phase complete");
+      }
+
+
     }
 
     if (visual_searching)
