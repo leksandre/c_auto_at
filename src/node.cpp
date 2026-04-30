@@ -1330,6 +1330,22 @@ namespace los_guidance
     // === ФАЗА 1: СБЛИЖЕНИЕ ПО GPS ===
     if (auto_phase_ == AutoPhase::GPS_APPROACH)
     {
+
+      if (takeoff_abort_)
+      {
+        handleTakeoffAbort();
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "🛑 EMERGENCY STOP active — all commands blocked");
+        for (int i = 0; i < 20; i++) // 20 * 1ms = 20ms
+        {
+
+          handleTakeoffAbort();
+
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return;
+      }
+
       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 9000, "GPS messsage Subscribers controlLoopTimerCallback");
       // 🆕 Инициализируем ref_gps_ при первом входе (если ещё не установлен)
       if (!ref_gps_valid_ && drone_gps_.is_valid)
@@ -1374,7 +1390,7 @@ namespace los_guidance
                            phase_name.c_str(), current_dist, camera_locked ? "LOCKED" : "SEARCHING");
 
       static int poll_counter = 0;
-      if (++poll_counter >= 2250)
+      if (++poll_counter >= 250)
       {
         poll_counter = 0;
 
@@ -1408,8 +1424,8 @@ namespace los_guidance
 
             if (queryTargetGPS(ip, target_query_port_, t_lat, t_lon, t_alt, t_sats))
             {
-              RCLCPP_INFO(this->get_logger(), "✅ Target controlLoopTimerCallback %s responded: lat=%.6f, lon=%.6f, alt=%.2f", 
-                    ip.c_str(), t_lat, t_lon, t_alt);
+              RCLCPP_INFO(this->get_logger(), "✅ Target controlLoopTimerCallback %s responded: lat=%.6f, lon=%.6f, alt=%.2f",
+                          ip.c_str(), t_lat, t_lon, t_alt);
               RCLCPP_INFO(this->get_logger(), "✅ Found available target: %s", ip.c_str());
               found_ip = ip;
               found_lat = t_lat;
@@ -1482,8 +1498,8 @@ namespace los_guidance
         vehicle_ctrl_->publishOffboardControlMode();
         // vehicle_ctrl_->publishPositionSetpoint(target_ned_);
         vehicle_ctrl_->publishPositionSetpoint(target_ned_,
-            Eigen::Vector3d{5.0, 0.0, 0.0},   // скорость
-            Eigen::Vector3d{0.2, 0.0, 0.0}    // ускорение);
+                                               Eigen::Vector3d{7.0, 0.0, 0.0}, // скорость
+                                               Eigen::Vector3d{0.3, 0.0, 0.0}  // ускорение);
         );
 
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
@@ -1825,7 +1841,7 @@ namespace los_guidance
           }
 
           vehicle_ctrl_->publishPositionSetpoint(target_pos,
-    Eigen::Vector3d{0.5, 0.0, 0.0} );
+                                                 Eigen::Vector3d{0.5, 0.0, 0.0});
         }
         break;
       }
@@ -1866,7 +1882,7 @@ namespace los_guidance
           target_ned.y() += offset_y;
 
           vehicle_ctrl_->publishPositionSetpoint(target_ned,
-    Eigen::Vector3d{0.5, 0.0, 0.0} );
+                                                 Eigen::Vector3d{0.5, 0.0, 0.0});
 
           RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                                 "🎯 Drift target: offset=(%.1f, %.1f), NED=(%.2f, %.2f, %.2f)",
@@ -1984,28 +2000,27 @@ namespace los_guidance
     return R * 2 * std::atan2(std::sqrt(a), std::sqrt(1 - a));
   }
 
-
-
-
-
-
   // === TCP-клиент для опроса целей ===
-bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats)
-{
+  bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats)
+  {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        RCLCPP_INFO(this->get_logger(), "🚫 Failed to create socket for GPS query to %s:%d", ip.c_str(), port);
-        return false;
+    if (sock < 0)
+    {
+      RCLCPP_INFO(this->get_logger(), "🚫 Failed to create socket for GPS query to %s:%d", ip.c_str(), port);
+      return false;
     }
 
     // ✅ Правильная инициализация структуры
-    struct sockaddr_in addr{};
+    struct sockaddr_in addr
+    {
+    };
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
-        RCLCPP_INFO(this->get_logger(), "🚫 Invalid IP address for GPS query: %s", ip.c_str());
-        close(sock);
-        return false;
+    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0)
+    {
+      RCLCPP_INFO(this->get_logger(), "🚫 Invalid IP address for GPS query: %s", ip.c_str());
+      close(sock);
+      return false;
     }
 
     // ✅ Увеличил таймаут до 500 мс (200 мс мало для сети)
@@ -2015,50 +2030,61 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        RCLCPP_INFO(this->get_logger(), "🚫 Failed to connect to target for GPS query: %s:%d", ip.c_str(), port);
-        close(sock);
-        return false;
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+    {
+      RCLCPP_INFO(this->get_logger(), "🚫 Failed to connect to target for GPS query: %s:%d", ip.c_str(), port);
+      close(sock);
+      return false;
     }
 
     // ✅ Отправка с проверкой
     std::string req = "{\"showgps\": true}\n";
     ssize_t sent = send(sock, req.c_str(), req.size(), 0);
-    if (sent < 0 || sent != static_cast<ssize_t>(req.size())) {
-        close(sock);
-        return false;
+    if (sent < 0 || sent != static_cast<ssize_t>(req.size()))
+    {
+      close(sock);
+      return false;
     }
 
     // ✅ Чтение ответа
     char buf[512] = {0};
     int n = recv(sock, buf, sizeof(buf) - 1, 0);
     close(sock);
-    if (n <= 0) {
-        RCLCPP_INFO(this->get_logger(), "🚫 No response received from target during GPS query: %s:%d", ip.c_str(), port);
-        return false;
+    if (n <= 0)
+    {
+      RCLCPP_INFO(this->get_logger(), "🚫 No response received from target during GPS query: %s:%d", ip.c_str(), port);
+      return false;
     }
     buf[n] = '\0';
 
     // ✅ Парсер с пропуском пробелов
-    auto findVal = [&](const char *key) -> double {
-        std::string s(buf);
-        size_t pos = s.find(key);
-        if (pos == std::string::npos) return 0.0;
-        pos = s.find(':', pos);
-        if (pos == std::string::npos) return 0.0;
+    auto findVal = [&](const char *key) -> double
+    {
+      std::string s(buf);
+      size_t pos = s.find(key);
+      if (pos == std::string::npos)
+        return 0.0;
+      pos = s.find(':', pos);
+      if (pos == std::string::npos)
+        return 0.0;
+      pos++;
+      while (pos < s.size() && std::isspace(s[pos]))
         pos++;
-        while (pos < s.size() && std::isspace(s[pos])) pos++;
-        try {
-            return std::stod(s.substr(pos));
-        } catch (...) {
-            return 0.0;
-        }
+      try
+      {
+        return std::stod(s.substr(pos));
+      }
+      catch (...)
+      {
+        return 0.0;
+      }
     };
 
     std::string data(buf);
-    if (data.find("\"status\"") == std::string::npos || data.find("success") == std::string::npos) {
-        RCLCPP_INFO(this->get_logger(), "🚫 Target responded with failure status during GPS query: %s:%d", ip.c_str(), port);
-        return false;
+    if (data.find("\"status\"") == std::string::npos || data.find("success") == std::string::npos)
+    {
+      RCLCPP_INFO(this->get_logger(), "🚫 Target responded with failure status during GPS query: %s:%d", ip.c_str(), port);
+      return false;
     }
 
     out_lat = findVal("\"lat\"");
@@ -2068,15 +2094,13 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
 
     // ✅ Валидация: sats опционален, проверяем только координаты
     bool has_valid_coords = (std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3);
-    if (!has_valid_coords) {
-        RCLCPP_INFO(this->get_logger(), "🚫 Target returned invalid GPS coordinates: lat=%.6f, lon=%.6f, alt=%.2f, sats=%d", 
-                    out_lat, out_lon, out_alt, out_sats);
+    if (!has_valid_coords)
+    {
+      RCLCPP_INFO(this->get_logger(), "🚫 Target returned invalid GPS coordinates: lat=%.6f, lon=%.6f, alt=%.2f, sats=%d",
+                  out_lat, out_lon, out_alt, out_sats);
     }
     return has_valid_coords;
-}
-
-
-
+  }
 
   // // === TCP-клиент для опроса целей ===
   // bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats)
@@ -2170,18 +2194,6 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
   //   bool has_valid_coords = (std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3);
   //   return has_valid_coords;
   // }
-
-
-
-
-
-
-
-
-
-
-
-
 
   // === Основная авто-последовательность ===
 
@@ -2527,7 +2539,6 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
 
     RCLCPP_WARN(this->get_logger(), "step 2");
 
-
     // 4. Poll targets
     if (commander_targets_.empty())
     {
@@ -2539,12 +2550,12 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
     RCLCPP_INFO(this->get_logger(), "📡 Polling %zu targets...", commander_targets_.size());
     std::string closest_ip;
     RCLCPP_INFO(this->get_logger(), "🔍 check: drone_gps_.lat =%d, start_alt=%.2f",
-                drone_gps_.is_valid ? 1 : 0, drone_gps_.lat );
+                drone_gps_.is_valid ? 1 : 0, drone_gps_.lat);
     double min_dist = std::numeric_limits<double>::max();
     double drone_lat = 0, drone_lon = 0, closest_lat = 0, closest_lon = 0, closest_alt = 0;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
-      
+
       if (drone_gps_.is_valid)
       {
         drone_lat = drone_gps_.lat;
@@ -2558,9 +2569,9 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
       int t_sats;
       if (queryTargetGPS(ip, target_query_port_, t_lat, t_lon, t_alt, t_sats))
       {
-        RCLCPP_INFO(this->get_logger(), "✅ Target AutomodeSec %s responded: lat=%.6f, lon=%.6f, alt=%.2f", 
+        RCLCPP_INFO(this->get_logger(), "✅ Target AutomodeSec %s responded: lat=%.6f, lon=%.6f, alt=%.2f",
                     ip.c_str(), t_lat, t_lon, t_alt);
-        RCLCPP_INFO(this->get_logger(), "✅ Target AutomodeSec %s responded: drone_lat=%.6f, drone_lon=%.6f", 
+        RCLCPP_INFO(this->get_logger(), "✅ Target AutomodeSec %s responded: drone_lat=%.6f, drone_lon=%.6f",
                     ip.c_str(), drone_lat, drone_lon);
         if (std::abs(drone_lat) > 1e-3)
         {
@@ -2573,8 +2584,8 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
             closest_lon = t_lon;
             closest_alt = t_alt;
 
-            RCLCPP_INFO(this->get_logger(), "✅ Closest target AutomodeSec %s responded: lat=%.6f, lon=%.6f, alt=%.2f", 
-                    ip.c_str(), t_lat, t_lon, t_alt);
+            RCLCPP_INFO(this->get_logger(), "✅ Closest target AutomodeSec %s responded: lat=%.6f, lon=%.6f, alt=%.2f",
+                        ip.c_str(), t_lat, t_lon, t_alt);
           }
         }
       }
@@ -2584,14 +2595,45 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
       }
     }
 
-    if (!closest_ip.empty()){
-      
-       visual_searching = this->get_parameter("takeoff.visual_searching").as_bool();
-       visual_search_timeout_s = this->get_parameter("takeoff.visual_search_timeout_s").as_int();
+    if (closest_ip.empty())
+    {
+
+      visual_searching = this->get_parameter("takeoff.visual_searching").as_bool();
+      visual_search_timeout_s = this->get_parameter("takeoff.visual_search_timeout_s").as_int();
 
       // 🆕 Визуальный поиск цели после взлёта (висим на месте, ждём обнаружения камерой)
 
       RCLCPP_INFO(this->get_logger(), " --- visual_searching %s", visual_searching ? "TRUE" : "FALSE");
+    }
+    else
+    {
+      for (int i = 0; i < 1200; i++)
+      {
+        // Вычисление желаемого yaw (угол от дрона к цели)
+        double target_yaw = NAN;
+        double dx = target_ned_.x(); // North
+        double dy = target_ned_.y(); // East
+        if (std::abs(dx) > 0.5 || std::abs(dy) > 0.5)
+        {
+          target_yaw = std::atan2(dy, dx); // Радианы, диапазон [-π, π]
+        }
+
+        // Если нужно передать yaw — модифицируйте publishPositionSetpoint
+        // или публикуйте полный TrajectorySetpoint вручную:
+        px4_msgs::msg::TrajectorySetpoint msg;
+        msg.position = {static_cast<float>(target_ned_.x()),
+                        static_cast<float>(target_ned_.y()),
+                        static_cast<float>(target_ned_.z())};
+        msg.velocity = {static_cast<float>(approach_velocity.x()),
+                        static_cast<float>(approach_velocity.y()),
+                        static_cast<float>(approach_velocity.z())};
+        msg.acceleration = {static_cast<float>(approach_acceleration.x()),
+                            static_cast<float>(approach_acceleration.y()),
+                            static_cast<float>(approach_acceleration.z())};
+        msg.yaw = std::isnan(target_yaw) ? NAN : static_cast<float>(target_yaw);
+        msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        trajectory_setpoint_pub_->publish(msg);
+      }
     }
 
     if (visual_searching)
@@ -2658,7 +2700,7 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
                 drone_gps_.lat, drone_gps_.lon, drone_gps_.alt,
                 ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
             vehicle_ctrl_->publishPositionSetpoint(hover_ned,
-    Eigen::Vector3d{0.5, 0.0, 0.0} );
+                                                   Eigen::Vector3d{0.5, 0.0, 0.0});
           }
         }
         vehicle_ctrl_->publishOffboardControlMode();
