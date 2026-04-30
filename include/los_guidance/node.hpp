@@ -491,7 +491,7 @@ bool update_acc_setpoint_{false};
     void executeAutoModeSequence();
 void executeSearchMode();                          // 🆕
     static double haversineDist(double lat1, double lon1, double lat2, double lon2);
-    static bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
+     bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
 
     // 🆕 Обработка прерывания взлёта
     void handleTakeoffAbort();
@@ -500,7 +500,7 @@ void executeSearchMode();                          // 🆕
   // === Математика расстояний (Haversine) ===
 
   static double haversineDist(double lat1, double lon1, double lat2, double lon2);
-  static bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
+   bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
   void executeAutoModeSequence();
 void executeSearchMode();                          // 🆕
 

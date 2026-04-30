@@ -1981,98 +1981,204 @@ namespace los_guidance
     return R * 2 * std::atan2(std::sqrt(a), std::sqrt(1 - a));
   }
 
-  // === TCP-клиент для опроса целей ===
-  bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats)
-  {
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0)
-      return false;
 
-    struct sockaddr_in addr
-    {
-    };
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0)
-    {
-      close(sock);
-      return false;
+
+
+
+
+  // === TCP-клиент для опроса целей ===
+bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats)
+{
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        RCLCPP_INFO(this->get_logger(), "🚫 Failed to create socket for GPS query to %s:%d", ip.c_str(), port);
+        return false;
     }
 
+    // ✅ Правильная инициализация структуры
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
+        RCLCPP_INFO(this->get_logger(), "🚫 Invalid IP address for GPS query: %s", ip.c_str());
+        close(sock);
+        return false;
+    }
+
+    // ✅ Увеличил таймаут до 500 мс (200 мс мало для сети)
     struct timeval tv;
     tv.tv_sec = 0;
-    tv.tv_usec = 200000; // 200 мс вместо 2 с
+    tv.tv_usec = 500000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
-    {
-      close(sock);
-      return false;
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        RCLCPP_INFO(this->get_logger(), "🚫 Failed to connect to target for GPS query: %s:%d", ip.c_str(), port);
+        close(sock);
+        return false;
     }
 
+    // ✅ Отправка с проверкой
     std::string req = "{\"showgps\": true}\n";
-    send(sock, req.c_str(), req.size(), 0);
+    ssize_t sent = send(sock, req.c_str(), req.size(), 0);
+    if (sent < 0 || sent != static_cast<ssize_t>(req.size())) {
+        close(sock);
+        return false;
+    }
+
+    // ✅ Чтение ответа
     char buf[512] = {0};
     int n = recv(sock, buf, sizeof(buf) - 1, 0);
     close(sock);
-    if (n <= 0)
-      return false;
+    if (n <= 0) {
+        RCLCPP_INFO(this->get_logger(), "🚫 No response received from target during GPS query: %s:%d", ip.c_str(), port);
+        return false;
+    }
     buf[n] = '\0';
 
-    // Лёгкий парсер без зависимостей
-    auto findVal = [&](const char *key) -> double
-    {
-      std::string s(buf);
-      size_t pos = s.find(key);
-      if (pos == std::string::npos)
-        return 0.0;
-      pos = s.find(':', pos);
-      if (pos == std::string::npos)
-        return 0.0;
-      try
-      {
-        return std::stod(s.c_str() + pos + 1);
-      }
-      // catch (...)
-      // {
-      //   return 0.0;
-      // }
-      catch (const std::exception &e)
-      {
-        // RCLCPP_WARN(logger_, "⚠️ Parse error for key '%s': %s", key, e.what());
-        std::cerr << "[WARN] Parse error for key in json " << key << "  !!errors\n";
-        return 0.0;
-      }
+    // ✅ Парсер с пропуском пробелов
+    auto findVal = [&](const char *key) -> double {
+        std::string s(buf);
+        size_t pos = s.find(key);
+        if (pos == std::string::npos) return 0.0;
+        pos = s.find(':', pos);
+        if (pos == std::string::npos) return 0.0;
+        pos++;
+        while (pos < s.size() && std::isspace(s[pos])) pos++;
+        try {
+            return std::stod(s.substr(pos));
+        } catch (...) {
+            return 0.0;
+        }
     };
 
-    // if (std::string(buf).find("\"status\":\"success\"") == std::string::npos)
-    //   return false;
-
     std::string data(buf);
-    if (data.find("\"status\"") == std::string::npos || data.find("success") == std::string::npos)
-    {
-      return false;
+    if (data.find("\"status\"") == std::string::npos || data.find("success") == std::string::npos) {
+        RCLCPP_INFO(this->get_logger(), "🚫 Target responded with failure status during GPS query: %s:%d", ip.c_str(), port);
+        return false;
     }
 
     out_lat = findVal("\"lat\"");
     out_lon = findVal("\"lon\"");
     out_alt = findVal("\"alt\"");
-    out_sats = (int)findVal("\"sats\"");
+    out_sats = static_cast<int>(findVal("\"sats\""));
 
-    //v1 with sats
-    //return (out_sats > 0 && std::abs(out_lat) > 1e-3);
-
-    //v2
-    // std::string response(buf);
-    // bool has_sats = response.find("\"sats\"") != std::string::npos;
-    // if (has_sats && out_sats <= 0) return false;
-    // return std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3;
-
-    //v3
+    // ✅ Валидация: sats опционален, проверяем только координаты
     bool has_valid_coords = (std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3);
+    if (!has_valid_coords) {
+        RCLCPP_INFO(this->get_logger(), "🚫 Target returned invalid GPS coordinates: lat=%.6f, lon=%.6f, alt=%.2f, sats=%d", 
+                    out_lat, out_lon, out_alt, out_sats);
+    }
     return has_valid_coords;
-  }
+}
+
+
+
+
+  // // === TCP-клиент для опроса целей ===
+  // bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats)
+  // {
+  //   int sock = socket(AF_INET, SOCK_STREAM, 0);
+  //   if (sock < 0)
+  //     return false;
+
+  //   struct sockaddr_in addr
+  //   {
+  //   };
+  //   addr.sin_family = AF_INET;
+  //   addr.sin_port = htons(port);
+  //   if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0)
+  //   {
+  //     close(sock);
+  //     return false;
+  //   }
+
+  //   struct timeval tv;
+  //   tv.tv_sec = 0;
+  //   tv.tv_usec = 200000; // 200 мс вместо 2 с
+  //   setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  //   setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+  //   if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+  //   {
+  //     close(sock);
+  //     return false;
+  //   }
+
+  //   std::string req = "{\"showgps\": true}\n";
+  //   send(sock, req.c_str(), req.size(), 0);
+  //   char buf[512] = {0};
+  //   int n = recv(sock, buf, sizeof(buf) - 1, 0);
+  //   close(sock);
+  //   if (n <= 0)
+  //     return false;
+  //   buf[n] = '\0';
+
+  //   // Лёгкий парсер без зависимостей
+  //   auto findVal = [&](const char *key) -> double
+  //   {
+  //     std::string s(buf);
+  //     size_t pos = s.find(key);
+  //     if (pos == std::string::npos)
+  //       return 0.0;
+  //     pos = s.find(':', pos);
+  //     if (pos == std::string::npos)
+  //       return 0.0;
+  //     try
+  //     {
+  //       return std::stod(s.c_str() + pos + 1);
+  //     }
+  //     // catch (...)
+  //     // {
+  //     //   return 0.0;
+  //     // }
+  //     catch (const std::exception &e)
+  //     {
+  //       // RCLCPP_WARN(logger_, "⚠️ Parse error for key '%s': %s", key, e.what());
+  //       std::cerr << "[WARN] Parse error for key in json " << key << "  !!errors\n";
+  //       return 0.0;
+  //     }
+  //   };
+
+  //   // if (std::string(buf).find("\"status\":\"success\"") == std::string::npos)
+  //   //   return false;
+
+  //   std::string data(buf);
+  //   if (data.find("\"status\"") == std::string::npos || data.find("success") == std::string::npos)
+  //   {
+  //     return false;
+  //   }
+
+  //   out_lat = findVal("\"lat\"");
+  //   out_lon = findVal("\"lon\"");
+  //   out_alt = findVal("\"alt\"");
+  //   out_sats = (int)findVal("\"sats\"");
+
+  //   //v1 with sats
+  //   //return (out_sats > 0 && std::abs(out_lat) > 1e-3);
+
+  //   //v2
+  //   // std::string response(buf);
+  //   // bool has_sats = response.find("\"sats\"") != std::string::npos;
+  //   // if (has_sats && out_sats <= 0) return false;
+  //   // return std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3;
+
+  //   //v3
+  //   bool has_valid_coords = (std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3);
+  //   return has_valid_coords;
+  // }
+
+
+
+
+
+
+
+
+
+
+
+
 
   // === Основная авто-последовательность ===
 
