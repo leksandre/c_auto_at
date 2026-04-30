@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-04-30 00:00:28
+Дата: 2026-04-30 15:43:41
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -1518,7 +1518,7 @@ bool update_acc_setpoint_{false};
     void executeAutoModeSequence();
 void executeSearchMode();                          // 🆕
     static double haversineDist(double lat1, double lon1, double lat2, double lon2);
-    static bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
+     bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
 
     // 🆕 Обработка прерывания взлёта
     void handleTakeoffAbort();
@@ -1527,7 +1527,7 @@ void executeSearchMode();                          // 🆕
   // === Математика расстояний (Haversine) ===
 
   static double haversineDist(double lat1, double lon1, double lat2, double lon2);
-  static bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
+   bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
   void executeAutoModeSequence();
 void executeSearchMode();                          // 🆕
 
@@ -3975,7 +3975,7 @@ int main(int argc, char **argv) {
 }
 ================================================================================
 Файл: ./src/node.cpp
-Строк: 2905
+Строк: 3031
 ================================================================================
 
 /**
@@ -5388,6 +5388,8 @@ namespace los_guidance
 
             if (queryTargetGPS(ip, target_query_port_, t_lat, t_lon, t_alt, t_sats))
             {
+              RCLCPP_INFO(this->get_logger(), "✅ Target controlLoopTimerCallback %s responded: lat=%.6f, lon=%.6f, alt=%.2f", 
+                    ip.c_str(), t_lat, t_lon, t_alt);
               RCLCPP_INFO(this->get_logger(), "✅ Found available target: %s", ip.c_str());
               found_ip = ip;
               found_lat = t_lat;
@@ -5456,6 +5458,7 @@ namespace los_guidance
       else
       {
         // Продолжаем лететь по GPS
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "🎯 go to Target acquired: still approach!");
         vehicle_ctrl_->publishOffboardControlMode();
         // vehicle_ctrl_->publishPositionSetpoint(target_ned_);
         vehicle_ctrl_->publishPositionSetpoint(target_ned_,
@@ -5961,98 +5964,204 @@ namespace los_guidance
     return R * 2 * std::atan2(std::sqrt(a), std::sqrt(1 - a));
   }
 
-  // === TCP-клиент для опроса целей ===
-  bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats)
-  {
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0)
-      return false;
 
-    struct sockaddr_in addr
-    {
-    };
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0)
-    {
-      close(sock);
-      return false;
+
+
+
+
+  // === TCP-клиент для опроса целей ===
+bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats)
+{
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        RCLCPP_INFO(this->get_logger(), "🚫 Failed to create socket for GPS query to %s:%d", ip.c_str(), port);
+        return false;
     }
 
+    // ✅ Правильная инициализация структуры
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
+        RCLCPP_INFO(this->get_logger(), "🚫 Invalid IP address for GPS query: %s", ip.c_str());
+        close(sock);
+        return false;
+    }
+
+    // ✅ Увеличил таймаут до 500 мс (200 мс мало для сети)
     struct timeval tv;
     tv.tv_sec = 0;
-    tv.tv_usec = 200000; // 200 мс вместо 2 с
+    tv.tv_usec = 500000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
-    {
-      close(sock);
-      return false;
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        RCLCPP_INFO(this->get_logger(), "🚫 Failed to connect to target for GPS query: %s:%d", ip.c_str(), port);
+        close(sock);
+        return false;
     }
 
+    // ✅ Отправка с проверкой
     std::string req = "{\"showgps\": true}\n";
-    send(sock, req.c_str(), req.size(), 0);
+    ssize_t sent = send(sock, req.c_str(), req.size(), 0);
+    if (sent < 0 || sent != static_cast<ssize_t>(req.size())) {
+        close(sock);
+        return false;
+    }
+
+    // ✅ Чтение ответа
     char buf[512] = {0};
     int n = recv(sock, buf, sizeof(buf) - 1, 0);
     close(sock);
-    if (n <= 0)
-      return false;
+    if (n <= 0) {
+        RCLCPP_INFO(this->get_logger(), "🚫 No response received from target during GPS query: %s:%d", ip.c_str(), port);
+        return false;
+    }
     buf[n] = '\0';
 
-    // Лёгкий парсер без зависимостей
-    auto findVal = [&](const char *key) -> double
-    {
-      std::string s(buf);
-      size_t pos = s.find(key);
-      if (pos == std::string::npos)
-        return 0.0;
-      pos = s.find(':', pos);
-      if (pos == std::string::npos)
-        return 0.0;
-      try
-      {
-        return std::stod(s.c_str() + pos + 1);
-      }
-      // catch (...)
-      // {
-      //   return 0.0;
-      // }
-      catch (const std::exception &e)
-      {
-        // RCLCPP_WARN(logger_, "⚠️ Parse error for key '%s': %s", key, e.what());
-        std::cerr << "[WARN] Parse error for key in json " << key << "  !!errors\n";
-        return 0.0;
-      }
+    // ✅ Парсер с пропуском пробелов
+    auto findVal = [&](const char *key) -> double {
+        std::string s(buf);
+        size_t pos = s.find(key);
+        if (pos == std::string::npos) return 0.0;
+        pos = s.find(':', pos);
+        if (pos == std::string::npos) return 0.0;
+        pos++;
+        while (pos < s.size() && std::isspace(s[pos])) pos++;
+        try {
+            return std::stod(s.substr(pos));
+        } catch (...) {
+            return 0.0;
+        }
     };
 
-    // if (std::string(buf).find("\"status\":\"success\"") == std::string::npos)
-    //   return false;
-
     std::string data(buf);
-    if (data.find("\"status\"") == std::string::npos || data.find("success") == std::string::npos)
-    {
-      return false;
+    if (data.find("\"status\"") == std::string::npos || data.find("success") == std::string::npos) {
+        RCLCPP_INFO(this->get_logger(), "🚫 Target responded with failure status during GPS query: %s:%d", ip.c_str(), port);
+        return false;
     }
 
     out_lat = findVal("\"lat\"");
     out_lon = findVal("\"lon\"");
     out_alt = findVal("\"alt\"");
-    out_sats = (int)findVal("\"sats\"");
+    out_sats = static_cast<int>(findVal("\"sats\""));
 
-    //v1 with sats
-    //return (out_sats > 0 && std::abs(out_lat) > 1e-3);
-
-    //v2
-    // std::string response(buf);
-    // bool has_sats = response.find("\"sats\"") != std::string::npos;
-    // if (has_sats && out_sats <= 0) return false;
-    // return std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3;
-
-    //v3
+    // ✅ Валидация: sats опционален, проверяем только координаты
     bool has_valid_coords = (std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3);
+    if (!has_valid_coords) {
+        RCLCPP_INFO(this->get_logger(), "🚫 Target returned invalid GPS coordinates: lat=%.6f, lon=%.6f, alt=%.2f, sats=%d", 
+                    out_lat, out_lon, out_alt, out_sats);
+    }
     return has_valid_coords;
-  }
+}
+
+
+
+
+  // // === TCP-клиент для опроса целей ===
+  // bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats)
+  // {
+  //   int sock = socket(AF_INET, SOCK_STREAM, 0);
+  //   if (sock < 0)
+  //     return false;
+
+  //   struct sockaddr_in addr
+  //   {
+  //   };
+  //   addr.sin_family = AF_INET;
+  //   addr.sin_port = htons(port);
+  //   if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0)
+  //   {
+  //     close(sock);
+  //     return false;
+  //   }
+
+  //   struct timeval tv;
+  //   tv.tv_sec = 0;
+  //   tv.tv_usec = 200000; // 200 мс вместо 2 с
+  //   setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  //   setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+  //   if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+  //   {
+  //     close(sock);
+  //     return false;
+  //   }
+
+  //   std::string req = "{\"showgps\": true}\n";
+  //   send(sock, req.c_str(), req.size(), 0);
+  //   char buf[512] = {0};
+  //   int n = recv(sock, buf, sizeof(buf) - 1, 0);
+  //   close(sock);
+  //   if (n <= 0)
+  //     return false;
+  //   buf[n] = '\0';
+
+  //   // Лёгкий парсер без зависимостей
+  //   auto findVal = [&](const char *key) -> double
+  //   {
+  //     std::string s(buf);
+  //     size_t pos = s.find(key);
+  //     if (pos == std::string::npos)
+  //       return 0.0;
+  //     pos = s.find(':', pos);
+  //     if (pos == std::string::npos)
+  //       return 0.0;
+  //     try
+  //     {
+  //       return std::stod(s.c_str() + pos + 1);
+  //     }
+  //     // catch (...)
+  //     // {
+  //     //   return 0.0;
+  //     // }
+  //     catch (const std::exception &e)
+  //     {
+  //       // RCLCPP_WARN(logger_, "⚠️ Parse error for key '%s': %s", key, e.what());
+  //       std::cerr << "[WARN] Parse error for key in json " << key << "  !!errors\n";
+  //       return 0.0;
+  //     }
+  //   };
+
+  //   // if (std::string(buf).find("\"status\":\"success\"") == std::string::npos)
+  //   //   return false;
+
+  //   std::string data(buf);
+  //   if (data.find("\"status\"") == std::string::npos || data.find("success") == std::string::npos)
+  //   {
+  //     return false;
+  //   }
+
+  //   out_lat = findVal("\"lat\"");
+  //   out_lon = findVal("\"lon\"");
+  //   out_alt = findVal("\"alt\"");
+  //   out_sats = (int)findVal("\"sats\"");
+
+  //   //v1 with sats
+  //   //return (out_sats > 0 && std::abs(out_lat) > 1e-3);
+
+  //   //v2
+  //   // std::string response(buf);
+  //   // bool has_sats = response.find("\"sats\"") != std::string::npos;
+  //   // if (has_sats && out_sats <= 0) return false;
+  //   // return std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3;
+
+  //   //v3
+  //   bool has_valid_coords = (std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3);
+  //   return has_valid_coords;
+  // }
+
+
+
+
+
+
+
+
+
+
+
+
 
   // === Основная авто-последовательность ===
 
@@ -6111,6 +6220,9 @@ namespace los_guidance
   {
     RCLCPP_INFO(this->get_logger(), "🚀 Starting AUTO mode sequence...");
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    bool visual_searching = false;
+    int visual_search_timeout_s = 600;
 
     // Сохраняем точку взлёта как NED-начало координат
     // 🆕 Сохраняем полную стартовую позицию (lat/lon/alt)
@@ -6395,12 +6507,6 @@ namespace los_guidance
 
     RCLCPP_WARN(this->get_logger(), "step 2");
 
-    // 🆕 Визуальный поиск цели после взлёта (висим на месте, ждём обнаружения камерой)
-
-    bool visual_searching = this->get_parameter("takeoff.visual_searching").as_bool();
-    int visual_search_timeout_s = this->get_parameter("takeoff.visual_search_timeout_s").as_int();
-
-    RCLCPP_INFO(this->get_logger(), " --- visual_searching %s", visual_searching ? "TRUE" : "FALSE");
 
     // 4. Poll targets
     if (commander_targets_.empty())
@@ -6412,10 +6518,13 @@ namespace los_guidance
 
     RCLCPP_INFO(this->get_logger(), "📡 Polling %zu targets...", commander_targets_.size());
     std::string closest_ip;
+    RCLCPP_INFO(this->get_logger(), "🔍 check: drone_gps_.lat =%d, start_alt=%.2f",
+                drone_gps_.is_valid ? 1 : 0, drone_gps_.lat );
     double min_dist = std::numeric_limits<double>::max();
     double drone_lat = 0, drone_lon = 0, closest_lat = 0, closest_lon = 0, closest_alt = 0;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
+      
       if (drone_gps_.is_valid)
       {
         drone_lat = drone_gps_.lat;
@@ -6429,6 +6538,10 @@ namespace los_guidance
       int t_sats;
       if (queryTargetGPS(ip, target_query_port_, t_lat, t_lon, t_alt, t_sats))
       {
+        RCLCPP_INFO(this->get_logger(), "✅ Target AutomodeSec %s responded: lat=%.6f, lon=%.6f, alt=%.2f", 
+                    ip.c_str(), t_lat, t_lon, t_alt);
+        RCLCPP_INFO(this->get_logger(), "✅ Target AutomodeSec %s responded: drone_lat=%.6f, drone_lon=%.6f", 
+                    ip.c_str(), drone_lat, drone_lon);
         if (std::abs(drone_lat) > 1e-3)
         {
           double d = haversineDist(drone_lat, drone_lon, t_lat, t_lon);
@@ -6439,6 +6552,9 @@ namespace los_guidance
             closest_lat = t_lat;
             closest_lon = t_lon;
             closest_alt = t_alt;
+
+            RCLCPP_INFO(this->get_logger(), "✅ Closest target AutomodeSec %s responded: lat=%.6f, lon=%.6f, alt=%.2f", 
+                    ip.c_str(), t_lat, t_lon, t_alt);
           }
         }
       }
@@ -6446,6 +6562,16 @@ namespace los_guidance
       {
         RCLCPP_WARN(this->get_logger(), "❌ Timeout/invalid response from %s", ip.c_str());
       }
+    }
+
+    if (!closest_ip.empty()){
+      
+       visual_searching = this->get_parameter("takeoff.visual_searching").as_bool();
+       visual_search_timeout_s = this->get_parameter("takeoff.visual_search_timeout_s").as_int();
+
+      // 🆕 Визуальный поиск цели после взлёта (висим на месте, ждём обнаружения камерой)
+
+      RCLCPP_INFO(this->get_logger(), " --- visual_searching %s", visual_searching ? "TRUE" : "FALSE");
     }
 
     if (visual_searching)
@@ -8063,7 +8189,7 @@ namespace los_guidance
 los_guidance_node:
   ros__parameters:
     attack:
-      max_approach_distance_m: 200.0
+      max_approach_distance_m: 5.0  # 200.0
     gps:
       source: "uart"   # Меняйте на "uart", чтобы использовать внешний GPS
     uart_gps:
@@ -8200,7 +8326,7 @@ los_guidance_node:
     commander:
       enable: true
       port: 11472
-      targets: ["192.168.14.169", "192.168.14.175", "192.168.14.163"] # если лист пустой... какая логика?
+      targets: ["192.168.14.203", "192.168.14.175", "192.168.14.199"] # если лист пустой... какая логика?
       target_port: 11472  # Порт, на котором цели слушают запросы SHOWGPS //11471 было
 
 === ФАЙЛЫ СБОРКИ ===
@@ -8340,7 +8466,7 @@ def generate_launch_description():
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 8171
+Всего строк: 8297
 ================================================================================
 .
 ├── CMakeLists.txt

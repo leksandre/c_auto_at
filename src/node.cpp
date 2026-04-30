@@ -1408,6 +1408,8 @@ namespace los_guidance
 
             if (queryTargetGPS(ip, target_query_port_, t_lat, t_lon, t_alt, t_sats))
             {
+              RCLCPP_INFO(this->get_logger(), "✅ Target controlLoopTimerCallback %s responded: lat=%.6f, lon=%.6f, alt=%.2f", 
+                    ip.c_str(), t_lat, t_lon, t_alt);
               RCLCPP_INFO(this->get_logger(), "✅ Found available target: %s", ip.c_str());
               found_ip = ip;
               found_lat = t_lat;
@@ -1476,6 +1478,7 @@ namespace los_guidance
       else
       {
         // Продолжаем лететь по GPS
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "🎯 go to Target acquired: still approach!");
         vehicle_ctrl_->publishOffboardControlMode();
         // vehicle_ctrl_->publishPositionSetpoint(target_ned_);
         vehicle_ctrl_->publishPositionSetpoint(target_ned_,
@@ -2238,6 +2241,9 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
     RCLCPP_INFO(this->get_logger(), "🚀 Starting AUTO mode sequence...");
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
+    bool visual_searching = false;
+    int visual_search_timeout_s = 600;
+
     // Сохраняем точку взлёта как NED-начало координат
     // 🆕 Сохраняем полную стартовую позицию (lat/lon/alt)
     {
@@ -2521,12 +2527,6 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
 
     RCLCPP_WARN(this->get_logger(), "step 2");
 
-    // 🆕 Визуальный поиск цели после взлёта (висим на месте, ждём обнаружения камерой)
-
-    bool visual_searching = this->get_parameter("takeoff.visual_searching").as_bool();
-    int visual_search_timeout_s = this->get_parameter("takeoff.visual_search_timeout_s").as_int();
-
-    RCLCPP_INFO(this->get_logger(), " --- visual_searching %s", visual_searching ? "TRUE" : "FALSE");
 
     // 4. Poll targets
     if (commander_targets_.empty())
@@ -2538,10 +2538,13 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
 
     RCLCPP_INFO(this->get_logger(), "📡 Polling %zu targets...", commander_targets_.size());
     std::string closest_ip;
+    RCLCPP_INFO(this->get_logger(), "🔍 check: drone_gps_.lat =%d, start_alt=%.2f",
+                drone_gps_.is_valid ? 1 : 0, drone_gps_.lat );
     double min_dist = std::numeric_limits<double>::max();
     double drone_lat = 0, drone_lon = 0, closest_lat = 0, closest_lon = 0, closest_alt = 0;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
+      
       if (drone_gps_.is_valid)
       {
         drone_lat = drone_gps_.lat;
@@ -2555,6 +2558,10 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
       int t_sats;
       if (queryTargetGPS(ip, target_query_port_, t_lat, t_lon, t_alt, t_sats))
       {
+        RCLCPP_INFO(this->get_logger(), "✅ Target AutomodeSec %s responded: lat=%.6f, lon=%.6f, alt=%.2f", 
+                    ip.c_str(), t_lat, t_lon, t_alt);
+        RCLCPP_INFO(this->get_logger(), "✅ Target AutomodeSec %s responded: drone_lat=%.6f, drone_lon=%.6f", 
+                    ip.c_str(), drone_lat, drone_lon);
         if (std::abs(drone_lat) > 1e-3)
         {
           double d = haversineDist(drone_lat, drone_lon, t_lat, t_lon);
@@ -2565,6 +2572,9 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
             closest_lat = t_lat;
             closest_lon = t_lon;
             closest_alt = t_alt;
+
+            RCLCPP_INFO(this->get_logger(), "✅ Closest target AutomodeSec %s responded: lat=%.6f, lon=%.6f, alt=%.2f", 
+                    ip.c_str(), t_lat, t_lon, t_alt);
           }
         }
       }
@@ -2572,6 +2582,16 @@ bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, doub
       {
         RCLCPP_WARN(this->get_logger(), "❌ Timeout/invalid response from %s", ip.c_str());
       }
+    }
+
+    if (!closest_ip.empty()){
+      
+       visual_searching = this->get_parameter("takeoff.visual_searching").as_bool();
+       visual_search_timeout_s = this->get_parameter("takeoff.visual_search_timeout_s").as_int();
+
+      // 🆕 Визуальный поиск цели после взлёта (висим на месте, ждём обнаружения камерой)
+
+      RCLCPP_INFO(this->get_logger(), " --- visual_searching %s", visual_searching ? "TRUE" : "FALSE");
     }
 
     if (visual_searching)
