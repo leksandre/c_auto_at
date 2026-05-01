@@ -160,9 +160,19 @@ namespace los_guidance
     int sync_retention_us{200000};
 
     // Takeoff параметры
-    int takeoff_timeout_s{20};
-  double kp_yaw_track{0.5};  // 🆕
-  double max_approach_distance{200.0};  ///< Максимальное расстояние для перехода в визуальную атаку (м)
+    int takeoff_timeout_s{20};  ///< Таймаут взлёта (секунды)
+    double kp_yaw_track{0.5};  // 🆕
+    double max_approach_distance{200.0};  ///< Максимальное расстояние для перехода в визуальную атаку (м)
+
+    // Параметры ручного управления
+    int manual_control_update_rate_hz{20};
+    double manual_control_deadzone{0.05};
+    double manual_control_smoothing_alpha_base{0.1};
+    double manual_control_smoothing_alpha_max{0.3};
+    double manual_control_max_rate_per_sec{2.0};
+    double manual_control_max_accel_mps2{1.86};
+    double manual_control_max_yaw_rate_dps{45.0};
+    double manual_control_max_vert_speed_mps{2.0};
   };
 
   /**
@@ -385,6 +395,7 @@ namespace los_guidance
     // === Callback Groups (для разделения AI и control flow) ===
     rclcpp::CallbackGroup::SharedPtr ai_callback_group_;      ///< Группа для AI подписок (отдельный поток)
     rclcpp::CallbackGroup::SharedPtr control_callback_group_; ///< Группа для PX4 telemetry + timer
+    rclcpp::CallbackGroup::SharedPtr manual_control_callback_group_; ///< Группа для ручного управления (отдельный поток)
 
     double start_lat_{0.0}, start_lon_{0.0}, start_alt_{0.0};
     bool start_gps_valid_{false};

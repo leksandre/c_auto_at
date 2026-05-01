@@ -631,6 +631,75 @@ namespace los_guidance
           [this]()
           {
             std::thread(&Node::executeSearchMode, this).detach();
+          ,
+          // 🎮 Колбэк для ручного управления
+          [this](float roll, float pitch, float yaw, float throttle) {
+            // === 1. Адаптивное сглаживание ===
+            static Eigen::Vector4d cmd_filtered{0, 0, 0, 0.5};
+            static uint64_t last_cmd_ts = 0;
+
+            // Динамический коэффициент сглаживания: медленнее при малых отклонениях
+            float magnitude = std::sqrt(roll*roll + pitch*pitch + yaw*yaw);
+            float alpha = 0.1f + 0.2f * std::min(magnitude, 1.0f); // 0.1...0.3
+
+            Eigen::Vector4d cmd_raw{roll, pitch, yaw, throttle};
+            cmd_filtered = (1.0f - alpha) * cmd_filtered + alpha * cmd_raw;
+
+            // === 2. Rate limiting (ограничение скорости изменения) ===
+            auto now = this->get_clock()->now().nanoseconds() / 1000;
+            float dt = (last_cmd_ts > 0) ? (now - last_cmd_ts) * 1e-6f : 0.016f;
+            last_cmd_ts = now;
+
+            const float MAX_RATE = 2.0f; // ед/сек
+            Eigen::Vector4d cmd_rate_limited = cmd_filtered;
+            for (int i = 0; i < 3; ++i) { // roll, pitch, yaw
+              float delta = cmd_filtered[i] - cmd_rate_limited[i];
+              float max_delta = MAX_RATE * dt;
+              if (std::abs(delta) > max_delta) {
+                cmd_rate_limited[i] += std::copysign(max_delta, delta);
+              }
+            }
+
+            // === 3. Конвертация в команды PX4 ===
+            // Roll/Pitch → горизонтальное ускорение (м/с²)
+            // Yaw → угловая скорость (рад/с)
+            // Throttle → вертикальная скорость (м/с)
+
+            double max_lat_acc = guidance_config_.max_lat_acc;
+            double max_yaw_rate = 45.0 * M_PI / 180.0;  // 45°/с
+            double max_vert_speed = 2.0;  // м/с
+
+            Eigen::Vector3d acc_cmd{
+                cmd_rate_limited.y() * max_lat_acc,   // pitch → X (North)
+                cmd_rate_limited.x() * max_lat_acc,   // roll → Y (East)
+                (0.5f - cmd_rate_limited.w()) * max_vert_acc  // throttle → Z (Down)
+            };
+
+            float yaw_rate_cmd = cmd_rate_limited.z() * static_cast<float>(max_yaw_rate);
+
+            // === 4. Публикация (только если не в авто-режиме) ===
+            if (auto_phase_ == AutoPhase::IDLE && active_command_ == ActiveCommand::NONE) {
+              // Отправляем комбинированный setpoint
+              px4_msgs::msg::TrajectorySetpoint ts;
+              ts.position = {NAN, NAN, NAN};
+              ts.velocity = {NAN, NAN, NAN};
+              ts.acceleration = {
+                  static_cast<float>(acc_cmd.x()),
+                  static_cast<float>(acc_cmd.y()),
+                  static_cast<float>(acc_cmd.z())
+              };
+              ts.yaw = NAN;
+              ts.yawspeed = yaw_rate_cmd;
+              ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+
+              trajectory_setpoint_pub_->publish(ts);
+              vehicle_ctrl_->publishOffboardControlMode();
+
+              RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 100,
+                  "🎮 Manual: r=%.2f p=%.2f y=%.2f t=%.2f → acc=[%.2f,%.2f,%.2f]",
+                  roll, pitch, yaw, throttle,
+                  acc_cmd.x(), acc_cmd.y(), acc_cmd.z());
+            }
           }); // ← Закрывающая скобка конструктора Commander
 
       commander_->start();
@@ -697,6 +766,10 @@ namespace los_guidance
 
     // 🚀 Control callback group — для PX4 telemetry + timer
     control_callback_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    // 🎮 Manual Control callback group — для ручного управления (отдельный поток)
+    manual_control_callback_group_ = this->create_callback_group(
         rclcpp::CallbackGroupType::MutuallyExclusive);
 
     // ========================================================================

@@ -32,6 +32,7 @@ namespace los_guidance
     using PatrolRoundCallback = std::function<void(double)>; // patrol diameter (m)
     using HoldSquareCallback = std::function<void(double)>;  // hold square size (m)
     using SearchModeCallback = std::function<void()>;        // 🆕 set_mode search
+    using ManualControlCallback = std::function<void(float, float, float, float)>; // roll, pitch, yaw, throttle
 
     explicit Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
                        GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger,
@@ -42,7 +43,8 @@ namespace los_guidance
                        AltitudeCallback down_cb = nullptr,            // 🆕
                        PatrolRoundCallback patrol_cb = nullptr,       // 🆕
                        HoldSquareCallback hold_cb = nullptr,          // 🆕
-                       SearchModeCallback search_mode_cb = nullptr);  // 🆕
+                       SearchModeCallback search_mode_cb = nullptr,   // 🆕
+                       ManualControlCallback manual_cb = nullptr); // 🆕
 
     ~Commander();
 
@@ -71,6 +73,7 @@ namespace los_guidance
     AltitudeCallback down_callback_;
     PatrolRoundCallback patrol_callback_;
     HoldSquareCallback hold_callback_;
+    ManualControlCallback manual_control_callback_; // 🆕
     rclcpp::Logger logger_;
     std::thread listen_thread_;
     std::atomic<bool> running_{false};

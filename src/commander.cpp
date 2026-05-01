@@ -16,7 +16,7 @@ namespace los_guidance
     ArmCallback arm_cb, LandCallback land_cb, SearchRoundCallback search_round_cb,
     AltitudeCallback up_cb, AltitudeCallback down_cb,
     PatrolRoundCallback patrol_cb, HoldSquareCallback hold_cb,
-    SearchModeCallback search_mode_cb)  // ← Добавлен 14-й параметр
+    SearchModeCallback search_mode_cb, ManualControlCallback manual_cb)  // ← Добавлен 15-й параметр
     : port_(port), attack_callback_(std::move(attack_cb)),
       auto_mode_callback_(std::move(auto_cb)), gps_query_callback_(std::move(gps_cb)),
       home_callback_(std::move(home_cb)), arm_callback_(std::move(arm_cb)),
@@ -24,6 +24,7 @@ namespace los_guidance
       search_mode_callback_(std::move(search_mode_cb)),  // ← Инициализация нового поля
       up_callback_(std::move(up_cb)), down_callback_(std::move(down_cb)),
       patrol_callback_(std::move(patrol_cb)), hold_callback_(std::move(hold_cb)),
+      manual_control_callback_(std::move(manual_cb)), // 🆕
       logger_(std::move(logger)) {}
 
   Commander::~Commander() { stop(); }
@@ -132,6 +133,33 @@ namespace los_guidance
 
   void Commander::processCommand(const std::string &data, int client_fd)
   {
+    // 🆕 Обработка manual_control
+    if (data.find("\"manual_control\"") != std::string::npos)
+    {
+      float roll = parseFloat(data, "roll", 0.0f);
+      float pitch = parseFloat(data, "pitch", 0.0f);
+      float yaw = parseFloat(data, "yaw", 0.0f);
+      float throttle = parseFloat(data, "throttle", 0.5f);
+      
+      // Применяем deadzone и нормализацию
+      const float DEADZONE = 0.05f;
+      auto applyDeadzone = [](float v, float dz) -> float {
+        if (std::abs(v) < dz) return 0.0f;
+        return (v > 0 ? (v - dz) : (v + dz)) / (1.0f - dz);
+      };
+      
+      if (manual_control_callback_) {
+        manual_control_callback_(
+          applyDeadzone(roll, DEADZONE),
+          applyDeadzone(pitch, DEADZONE),
+          applyDeadzone(yaw, DEADZONE),
+          std::clamp(throttle, 0.0f, 1.0f)  // throttle без deadzone
+        );
+      }
+      sendResponse(client_fd, "{\"status\":\"ok\",\"command\":\"manual_control\"}\n");
+      return;
+    }
+    
     // 🆕 1. Обработка showgps
     if (data.find("\"showgps\"") != std::string::npos)
     {
@@ -450,6 +478,15 @@ namespace los_guidance
     {
       return false;
     }
+  }
+
+  // 🆕 Универсальный метод парсинга float значения по ключу
+  float Commander::parseFloat(const std::string &data, const std::string &key, float default_value)
+  {
+    double result;
+    if (parseDoubleValue(data, key, result))
+      return static_cast<float>(result);
+    return default_value;
   }
 
 } // namespace los_guidance
