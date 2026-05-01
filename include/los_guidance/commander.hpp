@@ -57,6 +57,7 @@ namespace los_guidance
     void processCommand(const std::string &data, int client_fd);
     bool parseAttackCommand(const std::string &data, bool &result);
     bool parseDoubleValue(const std::string &data, const std::string &key, double &result); // 🆕
+    float parseFloat(const std::string &data, const std::string &key, float default_value); // 🆕
     void sendResponse(int fd, const std::string &json);
 
     int port_;

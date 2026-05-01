@@ -438,6 +438,21 @@ bool update_acc_setpoint_{false};
     };
     AutoPhase auto_phase_ = AutoPhase::IDLE;
 
+    // === Manual control input (from TCP Commander) ===
+    struct ManualInput {
+        std::atomic<float> roll{0.0f};
+        std::atomic<float> pitch{0.0f};
+        std::atomic<float> yaw{0.0f};
+        std::atomic<float> throttle{0.5f};
+        std::atomic<bool> updated{false};
+    };
+    ManualInput manual_input_;
+
+    // === Manual control limits ===
+    double max_speed_{3.0};                    // м/с
+    double max_vert_speed_{2.0};               // м/с  
+    double max_yaw_rate_{45.0 * M_PI / 180.0}; // рад/с
+
     // 🆕 Активная команда (ручное управление через TCP)
     enum class ActiveCommand
     {

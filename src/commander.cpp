@@ -118,6 +118,8 @@ namespace los_guidance
     {
       buffer[bytes_read] = '\0';
       processCommand(std::string(buffer), client_fd);
+    } else{
+      RCLCPP_ERROR(logger_, "🔌 Manual control client disconnected");
     }
     close(client_fd);
   }
