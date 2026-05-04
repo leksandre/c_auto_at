@@ -411,7 +411,7 @@ namespace los_guidance
     std::atomic<bool> attack_ready_{false}; ///< Система готова к атаке (lock-free)
 // std::atomic<double> last_los_cam_y_{0.0};  // 🆕
 std::atomic<double> last_los_cam_y_{0.0};  // 🆕
-bool update_acc_setpoint_{false};  
+bool update_acc_setpoint_{false}; 
 
 
 

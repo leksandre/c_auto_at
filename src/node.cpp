@@ -1371,6 +1371,13 @@ namespace los_guidance
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     start_attack_ = msg->data;
+
+    if (start_attack_){
+      auto_phase_ = AutoPhase::VISUAL_ATTACK;
+    } else {
+      auto_phase_ = AutoPhase::IDLE;
+    }
+
     RCLCPP_INFO(this->get_logger(), "Attack signal: %s", start_attack_ ? "START" : "STOP");
   }
 
