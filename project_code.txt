@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-05-01 18:22:29
+Дата: 2026-05-04 19:26:21
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -1442,7 +1442,7 @@ namespace los_guidance
     std::atomic<bool> attack_ready_{false}; ///< Система готова к атаке (lock-free)
 // std::atomic<double> last_los_cam_y_{0.0};  // 🆕
 std::atomic<double> last_los_cam_y_{0.0};  // 🆕
-bool update_acc_setpoint_{false};  
+bool update_acc_setpoint_{false}; 
 
 
 
@@ -4044,7 +4044,7 @@ int main(int argc, char **argv) {
 }
 ================================================================================
 Файл: ./src/node.cpp
-Строк: 3407
+Строк: 3414
 ================================================================================
 
 /**
@@ -5420,6 +5420,13 @@ namespace los_guidance
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     start_attack_ = msg->data;
+
+    if (start_attack_){
+      auto_phase_ = AutoPhase::VISUAL_ATTACK;
+    } else {
+      auto_phase_ = AutoPhase::IDLE;
+    }
+
     RCLCPP_INFO(this->get_logger(), "Attack signal: %s", start_attack_ ? "START" : "STOP");
   }
 
@@ -8922,7 +8929,7 @@ def generate_launch_description():
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 8753
+Всего строк: 8760
 ================================================================================
 .
 ├── CMakeLists.txt
