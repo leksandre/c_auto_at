@@ -1,6 +1,6 @@
 ================================================================================
 СОБРАННЫЙ ИСХОДНЫЙ КОД И ИНФОРМАЦИЯ О СБОРКЕ
-Дата: 2026-05-04 19:26:21
+Дата: 2026-05-09 13:52:06
 Директория: /home/kopty/planer_motion/lastc/src/los_guidance
 ================================================================================
 
@@ -282,25 +282,55 @@ private:
 #endif // LOS_GUIDANCE_GPS_PARSER_HPP_
 ================================================================================
 Файл: ./include/los_guidance/guidance_config.hpp
-Строк: 91
+Строк: 135
 ================================================================================
 
-#ifndef LOS_GUIDANCE_GUIDANCE_CONFIG_HPP_
-#define LOS_GUIDANCE_GUIDANCE_CONFIG_HPP_
+#pragma once
 
 #include <rclcpp/rclcpp.hpp>
-#include <string>
 
 namespace los_guidance {
 
-/**
- * @brief Конфигурация системы наведения LOS
- * 
- * Все параметры вынесены в config/params.yaml
- * Этот класс управляет загрузкой и валидацией параметров
- */
-struct GuidanceConfig {
-    // === Параметры навигации ===
+struct GuidanceConfig
+{
+  // Базовые параметры управления
+  double max_speed_{3.0};                    // м/с
+  double max_vert_speed_{2.0};               // м/с  
+  double max_yaw_rate_{45.0 * M_PI / 180.0}; // рад/с
+
+  // Параметры фильтрации ручного управления
+  double manual_roll_deadzone{0.1};           // Нулевая зона по крену
+  double manual_pitch_deadzone{0.1};          // Нулевая зона по тангажу
+  double manual_yaw_deadzone{0.1};            // Нулевая зона по рысканью
+  double manual_throttle_deadzone{0.05};      // Нулевая зона по газу
+
+  // Ограничения скорости изменения (для плавности)
+  double max_roll_slew_rate{2.0};             // Максимальная скорость изменения roll (ед/с)
+  double max_pitch_slew_rate{2.0};            // Максимальная скорость изменения pitch (ед/с)
+  double max_yaw_slew_rate{60.0 * M_PI / 180.0}; // Максимальная скорость изменения yaw (рад/с)
+  double max_throttle_slew_rate{1.0};         // Максимальная скорость изменения throttle (ед/с)
+
+  // Фильтр низких частот (первый порядок)
+  double manual_filter_time_constant{0.2};    // Время нарастания (сек), 0 = выкл
+
+  // Аварийные блокировки
+  bool enable_emergency_lockout{true};         // Включить режим блокировки при опасных сигналах
+  double throttle_cutoff_threshold{0.01};     // Порог отключения двигателя (низкий газ)
+  double throttle_spikes_threshold{0.9};      // Порог блокировки резких всплесков газа
+  double spike_filter_time_window{0.1};       // Окно фильтрации всплесков (с)
+
+  // Режимы плавности (как у корабля)
+  bool enable_ship_mode{true};                 // Включить медленный отклик
+  double ship_mode_response_factor{0.3};       // Фактор замедления (0.1 = очень медленно, 1.0 = нормально)
+
+  // Параметры переключения режимов
+  bool allow_vision_attack{true};             // Разрешить режим визуальной атаки
+  bool allow_autoland{true};                   // Разрешить автопосадку
+
+
+
+
+      // === Параметры навигации ===
     double kp_yaw{0.5};           // Пропорциональный коэффициент yaw
     double kp_thrust{0.1};        // Пропорциональный коэффициент тяги
     double kp_pitch{0.1};         // Пропорциональный коэффициент pitch
@@ -355,28 +385,42 @@ struct GuidanceConfig {
     double forward_speed{3.0};      // Скорость движения вперёд (м/с)
     double z_still_eps{0.03};       // Порог неподвижности по Z (м)
     
-    /**
-     * @brief Загрузка параметров из ROS2 параметров
-     * @param node ROS2 node для получения параметров
-     */
-    void loadFromROS(rclcpp::Node* node);
+
+
+
+    // // === Параметры ручного управления (добавить в конец структуры) ===
+    // // Deadzones
+    // float manual_roll_deadzone{0.05f};
+    // float manual_pitch_deadzone{0.05f};
+    // float manual_yaw_deadzone{0.05f};
+    // float manual_throttle_deadzone{0.05f};
+
+    // // Slew rate limits (ед/сек)
+    // float max_roll_slew_rate{2.0f};
+    // float max_pitch_slew_rate{2.0f};
+    // float max_yaw_slew_rate{2.0f};
+    // float max_throttle_slew_rate{2.0f};
+
+    // // Filter constants
+    // float manual_filter_time_constant{0.1f};  // seconds
+    // float ship_mode_response_factor{1.0f};     // response multiplier
+
+    // // Emergency safety
+    // float spike_filter_time_window{0.5f};      // seconds
+    // bool enable_emergency_lockout{true};
+    // float throttle_spikes_threshold{0.9f};
+    // float throttle_cutoff_threshold{0.1f};
+
+    // // Feature flags
+    // bool allow_vision_attack{true};
+    // bool allow_autoland{true};
+
     
-    /**
-     * @brief Валидация параметров
-     * @return true если все параметры корректны
-     */
-    bool validate() const;
-    
-    /**
-     * @brief Логирование текущей конфигурации
-     * @param logger ROS2 logger
-     */
-    void logConfig(rclcpp::Logger logger) const;
+  // Загрузка параметров из ноды
+  void loadFromNode(const rclcpp::Node::SharedPtr& node);
 };
 
-}  // namespace los_guidance
-
-#endif  // LOS_GUIDANCE_GUIDANCE_CONFIG_HPP_
+} // namespace los_guidance
 ================================================================================
 Файл: ./include/los_guidance/guidance_controller.hpp
 Строк: 372
@@ -1026,7 +1070,7 @@ private:
 #endif // LOS_GUIDANCE_LOS_ESTIMATOR_HPP_
 ================================================================================
 Файл: ./include/los_guidance/node.hpp
-Строк: 535
+Строк: 551
 ================================================================================
 
 /**
@@ -1092,6 +1136,9 @@ private:
 
 #include "los_guidance/gps_parser.hpp"
 
+
+#include <deque>
+#include <chrono>
 
 namespace los_guidance
 {
@@ -1479,6 +1526,17 @@ bool update_acc_setpoint_{false};
     };
     ManualInput manual_input_;
 
+    // === Manual control state for filtering ===
+    struct FilteredManualInput {
+        float roll_filtered{0.0f};
+        float pitch_filtered{0.0f};
+        float yaw_filtered{0.0f};
+        float throttle_filtered{0.5f};
+        std::chrono::steady_clock::time_point last_update;
+        std::deque<std::pair<uint64_t, float>> throttle_spikes_history; // для детекции всплесков
+    };
+    FilteredManualInput filtered_manual_input_;
+
     // === Manual control limits ===
     double max_speed_{3.0};                    // м/с
     double max_vert_speed_{2.0};               // м/с  
@@ -1493,7 +1551,9 @@ bool update_acc_setpoint_{false};
       UP_TO,             // Подъём на высоту
       DOWN_TO,           // Снижение на высоту
       PATROL_ROUND,      // Круговое патрулирование
-      HOLD_TO_SQUARE     // Удержание позиции в квадрате
+      HOLD_TO_SQUARE,     // Удержание позиции в квадрате
+      VISION_ATTACK,     // Режим визуальной атаки
+      AUTO_LAND          // Автопосадка
     };
     ActiveCommand active_command_ = ActiveCommand::NONE;
     double active_command_param_{0.0};  // Параметр активной команды
@@ -2990,10 +3050,87 @@ GpsData GpsParser::getData() const {
 } // namespace los_guidance
 ================================================================================
 Файл: ./src/guidance_config.cpp
-Строк: 0
+Строк: 77
 ================================================================================
 
+#include "los_guidance/guidance_config.hpp"
 
+namespace los_guidance {
+
+//void GuidanceConfig::loadFromNode(const rclcpp::Node::SharedPtr& node)
+void GuidanceConfig::loadFromNode(const rclcpp::Node::SharedPtr& node)
+{
+  // === Базовые параметры управления ===
+  node->declare_parameter("max_speed", max_speed_);
+  node->get_parameter("max_speed", max_speed_);
+
+  node->declare_parameter("max_vert_speed", max_vert_speed_);
+  node->get_parameter("max_vert_speed", max_vert_speed_);
+
+  node->declare_parameter("max_yaw_rate", max_yaw_rate_);
+  node->get_parameter("max_yaw_rate", max_yaw_rate_);
+
+  // === Фильтрация ручного управления ===
+  node->declare_parameter("manual_roll_deadzone", manual_roll_deadzone);
+  node->get_parameter("manual_roll_deadzone", manual_roll_deadzone);
+
+  node->declare_parameter("manual_pitch_deadzone", manual_pitch_deadzone);
+  node->get_parameter("manual_pitch_deadzone", manual_pitch_deadzone);
+
+  node->declare_parameter("manual_yaw_deadzone", manual_yaw_deadzone);
+  node->get_parameter("manual_yaw_deadzone", manual_yaw_deadzone);
+
+  node->declare_parameter("manual_throttle_deadzone", manual_throttle_deadzone);
+  node->get_parameter("manual_throttle_deadzone", manual_throttle_deadzone);
+
+  // === Ограничения скорости изменения (slew rate limiting) ===
+  node->declare_parameter("max_roll_slew_rate", max_roll_slew_rate);
+  node->get_parameter("max_roll_slew_rate", max_roll_slew_rate);
+
+  node->declare_parameter("max_pitch_slew_rate", max_pitch_slew_rate);
+  node->get_parameter("max_pitch_slew_rate", max_pitch_slew_rate);
+
+  node->declare_parameter("max_yaw_slew_rate", max_yaw_slew_rate);
+  node->get_parameter("max_yaw_slew_rate", max_yaw_slew_rate);
+
+  node->declare_parameter("max_throttle_slew_rate", max_throttle_slew_rate);
+  node->get_parameter("max_throttle_slew_rate", max_throttle_slew_rate);
+
+  // === Фильтр низких частот ===
+  node->declare_parameter("manual_filter_time_constant", manual_filter_time_constant);
+  node->get_parameter("manual_filter_time_constant", manual_filter_time_constant);
+
+  // === Аварийные блокировки ===
+  node->declare_parameter("enable_emergency_lockout", enable_emergency_lockout);
+  node->get_parameter("enable_emergency_lockout", enable_emergency_lockout);
+
+  node->declare_parameter("throttle_cutoff_threshold", throttle_cutoff_threshold);
+  node->get_parameter("throttle_cutoff_threshold", throttle_cutoff_threshold);
+
+  node->declare_parameter("throttle_spikes_threshold", throttle_spikes_threshold);
+  node->get_parameter("throttle_spikes_threshold", throttle_spikes_threshold);
+
+  node->declare_parameter("spike_filter_time_window", spike_filter_time_window);
+  node->get_parameter("spike_filter_time_window", spike_filter_time_window);
+
+  // === Режимы плавности ===
+  node->declare_parameter("enable_ship_mode", enable_ship_mode);
+  node->get_parameter("enable_ship_mode", enable_ship_mode);
+
+  node->declare_parameter("ship_mode_response_factor", ship_mode_response_factor);
+  node->get_parameter("ship_mode_response_factor", ship_mode_response_factor);
+
+  // === Режимы переключения ===
+  node->declare_parameter("allow_vision_attack", allow_vision_attack);
+  node->get_parameter("allow_vision_attack", allow_vision_attack);
+
+  node->declare_parameter("allow_autoland", allow_autoland);
+  node->get_parameter("allow_autoland", allow_autoland);
+
+  RCLCPP_INFO(node->get_logger(), "GuidanceConfig loaded successfully");
+}
+
+} // namespace los_guidance
 ================================================================================
 Файл: ./src/guidance_controller.cpp
 Строк: 586
@@ -4044,7 +4181,7 @@ int main(int argc, char **argv) {
 }
 ================================================================================
 Файл: ./src/node.cpp
-Строк: 3414
+Строк: 3488
 ================================================================================
 
 /**
@@ -4702,70 +4839,139 @@ namespace los_guidance
                     static_cast<int>(auto_phase_));
             }
 
-            // === 1. Адаптивное сглаживание ===
-            static Eigen::Vector4d cmd_filtered{0, 0, 0, 0.5};
+            // === 1. Применение фильтрации и ограничений к ручному управлению ===
+            //const auto& cfg = guidance_config_;
+            
+            const auto& cfg = guidance_config_;
+            auto now = std::chrono::steady_clock::now();
+            auto dt = std::chrono::duration<float>(now - filtered_manual_input_.last_update).count();
+            filtered_manual_input_.last_update = now;
 
-            // Динамический коэффициент сглаживания: медленнее при малых отклонениях
-            float magnitude = std::sqrt(roll * roll + pitch * pitch + yaw * yaw);
-            float alpha = 0.1f + 0.2f * std::min(magnitude, 1.0f); // 0.1...0.3
+            // Функция для фильтрации с зоной нечувствительности, ограничением скорости и фильтром низких частот
+            auto filterAxis = [&](float raw_input, float& filtered_state, float deadzone, float max_slew_rate, float filter_time_constant) -> float {
+                // Устранение мертвых зон
+                float corrected = std::abs(raw_input) > deadzone ? raw_input : 0.0f;
 
-    
-                RCLCPP_INFO(this->get_logger(), "-----------0: r=%.2f p=%.2f y=%.2f t=%.2f | Phase=%d",
-                    manual_input_.roll.load(), manual_input_.pitch.load(),
-                    manual_input_.yaw.load(), manual_input_.throttle.load(),
-                    static_cast<int>(auto_phase_));
-    
-            Eigen::Vector4d cmd_raw{roll, pitch, yaw, throttle};
-            cmd_filtered = (1.0f - alpha) * cmd_filtered + alpha * cmd_raw;
+                // Пропуск через ФНЧ первого порядка
+                float alpha = 1.0f;
+                if (filter_time_constant > 0.0f && dt > 0.0f) {
+                    float tau = filter_time_constant / cfg.ship_mode_response_factor;
+                    alpha = dt / (tau + dt);
+                }
+                float new_filtered = filtered_state + alpha * (corrected - filtered_state);
 
-            // === 2. Rate limiting (ограничение скорости изменения) ===
-            static uint64_t last_cmd_ts = 0;
-            now_us = this->get_clock()->now().nanoseconds() / 1000;
-            float dt = (last_cmd_ts > 0) ? (now_us - last_cmd_ts) * 1e-6f : 0.016f;
-            last_cmd_ts = now_us;
+                // Ограничение скорости изменения (slew rate limiting)
+                float max_delta = max_slew_rate * dt;
+                float delta = new_filtered - filtered_state;
+                if (std::abs(delta) > max_delta) {
+                    new_filtered = filtered_state + std::copysign(max_delta, delta);
+                }
 
-            const float MAX_RATE = 2.0f; // ед/сек
-            Eigen::Vector4d cmd_rate_limited = cmd_filtered;
-            for (int i = 0; i < 3; ++i)
-            { // roll, pitch, yaw
-              float delta = cmd_filtered[i] - cmd_rate_limited[i];
-              float max_delta = MAX_RATE * dt;
-              if (std::abs(delta) > max_delta)
-              {
-                cmd_rate_limited[i] += std::copysign(max_delta, delta);
-              }
+                return new_filtered;
+            };
+
+            // Применение фильтрации к каждой оси
+            float filtered_roll = filterAxis(roll, filtered_manual_input_.roll_filtered, 
+                                            cfg.manual_roll_deadzone, cfg.max_roll_slew_rate, cfg.manual_filter_time_constant);
+            float filtered_pitch = filterAxis(pitch, filtered_manual_input_.pitch_filtered, 
+                                             cfg.manual_pitch_deadzone, cfg.max_pitch_slew_rate, cfg.manual_filter_time_constant);
+            float filtered_yaw = filterAxis(yaw, filtered_manual_input_.yaw_filtered, 
+                                           cfg.manual_yaw_deadzone, cfg.max_yaw_slew_rate, cfg.manual_filter_time_constant);
+            
+            // Специальная фильтрация для дроссельной заслонки с поддержкой истории для обнаружения всплесков
+            float corrected_throttle = std::abs(throttle - 0.5f) > cfg.manual_throttle_deadzone ? throttle : 0.5f;
+            float alpha_throttle = 1.0f;
+            if (cfg.manual_filter_time_constant > 0.0f && dt > 0.0f) {
+                float tau = cfg.manual_filter_time_constant / cfg.ship_mode_response_factor;
+                alpha_throttle = dt / (tau + dt);
+            }
+            float new_throttle_filtered = filtered_manual_input_.throttle_filtered + 
+                                          alpha_throttle * (corrected_throttle - filtered_manual_input_.throttle_filtered);
+
+            // Ограничение скорости изменения для газа
+            float max_throttle_delta = cfg.max_throttle_slew_rate * dt;
+            float throttle_delta = new_throttle_filtered - filtered_manual_input_.throttle_filtered;
+            if (std::abs(throttle_delta) > max_throttle_delta) {
+                new_throttle_filtered = filtered_manual_input_.throttle_filtered + 
+                                        std::copysign(max_throttle_delta, throttle_delta);
+            }
+            // 🔒 Блокировка сброса в ноль и резкой перегазовки
+            if (manual_input_.throttle < 0.1f || manual_input_.throttle > 0.9f) {
+                RCLCPP_WARN(this->get_logger(), "🛑 ОПАСНЫЙ ВВОД: Слишком низкий или высокий газ, команда игнорируется");
+                new_throttle_filtered = filtered_manual_input_.throttle_filtered; // Сохраняем предыдущее значение
+            } else {
+                filtered_manual_input_.throttle_filtered = new_throttle_filtered;
             }
 
- 
-                RCLCPP_INFO(this->get_logger(), "-----------1: r=%.2f p=%.2f y=%.2f t=%.2f | Phase=%d",
-                    manual_input_.roll.load(), manual_input_.pitch.load(),
-                    manual_input_.yaw.load(), manual_input_.throttle.load(),
-                    static_cast<int>(auto_phase_));
-            
+            // Обнаружение опасных всплесков дросселя
+            uint64_t now_us_timestamp = now_us;
+            filtered_manual_input_.throttle_spikes_history.push_back({now_us_timestamp, new_throttle_filtered});
+            // Удаление устаревших записей за пределами окна
+            while (!filtered_manual_input_.throttle_spikes_history.empty() && 
+                   (now_us_timestamp - filtered_manual_input_.throttle_spikes_history.front().first) > 
+                   static_cast<uint64_t>(cfg.spike_filter_time_window * 1e6)) {
+                filtered_manual_input_.throttle_spikes_history.pop_front();
+            }
+
+            // Проверка на опасные команды (резкие всплески или отключение)
+            bool is_throttle_spike_dangerous = cfg.enable_emergency_lockout && 
+                !filtered_manual_input_.throttle_spikes_history.empty() && 
+                filtered_manual_input_.throttle_spikes_history.back().second > cfg.throttle_spikes_threshold;
+            bool is_throttle_cutoff_dangerous = cfg.enable_emergency_lockout && 
+                new_throttle_filtered < cfg.throttle_cutoff_threshold;
+
+            if (is_throttle_spike_dangerous || is_throttle_cutoff_dangerous) {
+                RCLCPP_WARN(this->get_logger(), "🛑 ОПАСНЫЙ ВВОД: Слишком высокий всплеск или отключение дросселя, команда игнорируется");
+                return; // Блокировка опасных команд
+            }
+
+            // === 2. Переключение режимов по команде ===
+            if (active_command_ == ActiveCommand::VISION_ATTACK && cfg.allow_vision_attack) {
+                // Логика переключения в режим визуальной атаки
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                if (auto_phase_ == AutoPhase::IDLE) {
+                    auto_phase_ = AutoPhase::VISUAL_ATTACK;
+                    RCLCPP_INFO(this->get_logger(), "🎯 Переключение в режим визуальной атаки по команде");
+                }
+            }
+            else if (active_command_ == ActiveCommand::AUTO_LAND && cfg.allow_autoland) {
+                // Логика автопосадки
+                RCLCPP_INFO(this->get_logger(), "🛬 Инициирована автопосадка по команде");
+                // Здесь должна быть вызвана соответствующая функция посадки
+                // executeAutoLandSequence();
+            }
+
             // === 3. Конвертация в команды PX4 ===
             // Roll/Pitch → горизонтальное ускорение (м/с²)
             // Yaw → угловая скорость (рад/с)
             // Throttle → вертикальная скорость (м/с)
 
-            double max_lat_acc = guidance_config_.max_lat_acc;
+            // double max_lat_acc = guidance_config_.max_lat_acc;
+            double max_lat_acc = config_.max_lat_acc; // ✅ Берём из NodeConfig
             double max_yaw_rate = 45.0 * M_PI / 180.0; // 45°/с
-            // double max_vert_speed = 2.0;  // м/с
 
             Eigen::Vector3d acc_cmd;
-            acc_cmd.x() = cmd_rate_limited.y() * max_lat_acc;                            // pitch → X (North)
-            acc_cmd.y() = cmd_rate_limited.x() * max_lat_acc;                            // roll → Y (East)
-            acc_cmd.z() = (0.5f - cmd_rate_limited.w()) * guidance_config_.max_down_acc; // throttle → Z (Down)
+            acc_cmd.x() = filtered_pitch * max_lat_acc;                           // pitch → X (North)
+            acc_cmd.y() = filtered_roll * max_lat_acc;                            // roll → Y (East)
+            //acc_cmd.z() = (0.5f - filtered_manual_input_.throttle_filtered) * guidance_config_.max_down_acc; // throttle → Z (Down)
 
-            float yaw_rate_cmd = cmd_rate_limited.z() * static_cast<float>(max_yaw_rate);
+            acc_cmd.z() = (0.5f - filtered_manual_input_.throttle_filtered) * config_.max_down_acc; // ✅
 
-                RCLCPP_INFO(this->get_logger(), "-----------2: r=%.2f p=%.2f y=%.2f t=%.2f | Phase=%d",
-                    manual_input_.roll.load(), manual_input_.pitch.load(),
-                    manual_input_.yaw.load(), manual_input_.throttle.load(),
-                    static_cast<int>(auto_phase_));
-            
+            float yaw_rate_cmd = filtered_yaw * static_cast<float>(max_yaw_rate);
+
+            // Обновление отфильтрованных значений
+            filtered_manual_input_.roll_filtered = filtered_roll;
+            filtered_manual_input_.pitch_filtered = filtered_pitch;
+            filtered_manual_input_.yaw_filtered = filtered_yaw;
+
+
+                // RCLCPP_INFO(this->get_logger(), "-----------2: r=%.2f p=%.2f y=%.2f t=%.2f | Phase=%d",
+                //     manual_input_.roll.load(), manual_input_.pitch.load(),
+                //     manual_input_.yaw.load(), manual_input_.throttle.load(),
+                //     static_cast<int>(auto_phase_));
+                    
             // === 4. Публикация (только если не в авто-режиме) ===
-            if (auto_phase_ == AutoPhase::IDLE && active_command_ == ActiveCommand::NONE){}
-            
+            if (auto_phase_ == AutoPhase::IDLE && active_command_ == ActiveCommand::NONE) {
               // Отправляем комбинированный setpoint
               px4_msgs::msg::TrajectorySetpoint ts;
               ts.position = {NAN, NAN, NAN};
@@ -4781,20 +4987,24 @@ namespace los_guidance
               trajectory_setpoint_pub_->publish(ts);
               vehicle_ctrl_->publishOffboardControlMode();
 
-               RCLCPP_INFO(this->get_logger(), "-----------3: r=%.2f p=%.2f y=%.2f t=%.2f | Phase=%d",
-                    manual_input_.roll.load(), manual_input_.pitch.load(),
-                    manual_input_.yaw.load(), manual_input_.throttle.load(),
-                    static_cast<int>(auto_phase_));
+              //  RCLCPP_INFO(this->get_logger(), "-----------3: r=%.2f p=%.2f y=%.2f t=%.2f | Phase=%d",
+              //       manual_input_.roll.load(), manual_input_.pitch.load(),
+              //       manual_input_.yaw.load(), manual_input_.throttle.load(),
+              //       static_cast<int>(auto_phase_));
 
-              RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 100,
-                                    "🎮 Manual: r=%.2f p=%.2f y=%.2f t=%.2f → acc=[%.2f,%.2f,%.2f]",
-                                    roll, pitch, yaw, throttle,
-                                    acc_cmd.x(), acc_cmd.y(), acc_cmd.z());
+              // RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 100,
+              //                       "🎮 Manual: r=%.2f p=%.2f y=%.2f t=%.2f → acc=[%.2f,%.2f,%.2f]",
+              //                       roll, pitch, yaw, throttle,
+              //                       acc_cmd.x(), acc_cmd.y(), acc_cmd.z());
             
-          }); // ← Закрывающая скобка конструктора Commander
-
+          }
+          }
+        
+        ); // ← Закрывающая скобка конструктора Commander
+        
       commander_->start();
       RCLCPP_INFO(this->get_logger(), "✅ Commander TCP server started on port %d", commander_port_);
+    
     }
     else
     {
@@ -5533,7 +5743,7 @@ namespace los_guidance
 
       // Логирование факта публикации
       RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-          "📡 PUBLISHED TrajectorySetpoint: vel=[%.2f,%.2f,%.2f] yawspeed=%.2f",
+          "📡 MANUAL PUBLISHED TrajectorySetpoint: vel=[%.2f,%.2f,%.2f] yawspeed=%.2f",
           msg.velocity[0], msg.velocity[1], msg.velocity[2],
           msg.yawspeed);
 
@@ -5723,9 +5933,10 @@ namespace los_guidance
       }
 
       // Условие перехода в атаку: камера видит цель И расстояние < 200м
-      if (camera_locked && current_dist < config_.max_approach_distance) // && current_dist < 200.0 // потом добавил условие на дистанцию
-      {
-        auto_phase_ = AutoPhase::VISUAL_ATTACK;
+        if (camera_locked && current_dist < config_.max_approach_distance) // && current_dist < 200.0 // потом добавил условие на дистанцию
+        {
+          RCLCPP_INFO(this->get_logger(), "🎯 Target acquired! Switching to VISUAL_ATTACK");
+          auto_phase_ = AutoPhase::VISUAL_ATTACK;
         start_attack_ = true;
         attack_enabled_ = true;
         RCLCPP_INFO(this->get_logger(), "🎯 VISUAL ATTACK ENGAGED (dist=%.1fm < 200m)", current_dist);
@@ -8635,7 +8846,7 @@ namespace los_guidance
 
 ================================================================================
 Файл конфигурации: ./config/params.yaml
-Строк: 152
+Строк: 168
 ================================================================================
 
 los_guidance_node:
@@ -8652,11 +8863,11 @@ los_guidance_node:
       throttle_interval_ms: 136000
     takeoff:
       climb_rate_mps: -1.0  # 10 м/с
-      target_altitude_m: 80.0 
+      target_altitude_m: 60.0 
       altitude_threshold_m: 1.5 
       min_altitude_already_flying_m: 2.0 
       min_cycles_for_already_flying: 120 
-      skip: true                    # Пропуск взлёта
+      skip: false                    # Пропуск взлёта
       visual_searching: true         # 🔍 Визуальный поиск после взлёта
       visual_search_timeout_s: 300   # ⏰ 5 минут ожидания
       timeout_s: 20
@@ -8778,7 +8989,7 @@ los_guidance_node:
     commander:
       enable: true
       port: 11472
-      targets: ["192.168.14.169", "192.168.14.199", "192.168.14.179"] # если лист пустой... какая логика?
+      targets: [ "192.168.14.169", "192.168.14.175", "192.168.14.179"] # если лист пустой... какая логика?
       target_port: 11472  # Порт, на котором цели слушают запросы SHOWGPS //11471 было
     
     # === Параметры ручного управления (добавлено) ===
@@ -8788,9 +8999,25 @@ los_guidance_node:
       smoothing_alpha_base: 0.1   # Базовое сглаживание
       smoothing_alpha_max: 0.3    # Макс. сглаживание при больших отклонениях
       max_rate_per_sec: 2.0       # Макс. скорость изменения команд
-      max_accel_mps2: 1.86        # Макс. ускорение (из guidance)
-      max_yaw_rate_dps: 45.0      # Макс. скорость вращения (град/с)
-      max_vert_speed_mps: 2.0     # Макс. вертикальная скорость
+      max_accel_mps2: 1.0        # Макс. ускорение (из guidance), уменьшено для неопытных
+      max_yaw_rate_dps: 30.0      # Макс. скорость вращения (град/с), уменьшено для неопытных
+      max_vert_speed_mps: 1.0     # Макс. вертикальная скорость, уменьшено для неопытных
+      roll_deadzone: 0.05
+      pitch_deadzone: 0.05
+      yaw_deadzone: 0.05
+      throttle_deadzone: 0.05
+      max_roll_slew_rate: 2.0
+      max_pitch_slew_rate: 2.0
+      max_yaw_slew_rate: 2.0
+      max_throttle_slew_rate: 2.0
+      filter_time_constant: 0.1
+      ship_mode_response_factor: 1.0
+      spike_filter_time_window: 0.5
+      enable_emergency_lockout: true
+      throttle_spikes_threshold: 0.9
+      throttle_cutoff_threshold: 0.1
+      allow_vision_attack: true
+      allow_autoland: true
 
 === ФАЙЛЫ СБОРКИ ===
 
@@ -8929,41 +9156,5 @@ def generate_launch_description():
 Из них файлов сборки: 1
 Из них YAML конфигов: 1
 Из них Launch файлов: 1
-Всего строк: 8760
+Всего строк: 8987
 ================================================================================
-.
-├── CMakeLists.txt
-├── collect_code_with_make_file.sh
-├── config
-│   └── params.yaml
-├── include
-│   └── los_guidance
-│       ├── adrc.hpp
-│       ├── commander.hpp
-│       ├── gps_parser.hpp
-│       ├── guidance_config.hpp
-│       ├── guidance_controller.hpp
-│       ├── los_estimator.hpp
-│       ├── node.hpp
-│       ├── sensor_sync.hpp
-│       ├── target_tracker.hpp
-│       └── vehicle_controller.hpp
-├── launch
-│   └── los_guidance.launch.py
-├── package.xml
-├── project_code.txt
-├── src
-│   ├── commander.cpp
-│   ├── gps_parser.cpp
-│   ├── guidance_config.cpp
-│   ├── guidance_controller.cpp
-│   ├── los_estimator.cpp
-│   ├── main.cpp
-│   ├── node.cpp
-│   ├── sensor_sync.cpp
-│   ├── target_tracker.cpp
-│   └── vehicle_controller.cpp
-├── tree.txt
-└── update_search_mode.sh
-
-5 directories, 28 files

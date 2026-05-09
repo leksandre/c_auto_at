@@ -101,6 +101,27 @@ namespace los_guidance
     // 🆕 Компенсация ЦТ
     double cg_trim_pitch_deg{2.5};
     bool enable_cg_compensation{true};
+
+    
+
+    double ship_mode_response_factor{0.3};
+    double manual_roll_deadzone{0.1};
+    double max_roll_slew_rate{2.0};
+    double manual_filter_time_constant{0.2};
+    double manual_pitch_deadzone{0.1};
+    double max_pitch_slew_rate{2.0};
+    double manual_yaw_deadzone{0.1};
+    double max_yaw_slew_rate{60.0 * M_PI / 180.0}; // rad/s
+    double manual_throttle_deadzone{0.05};
+    double max_throttle_slew_rate{1.0};
+    double spike_filter_time_window{0.1};
+    bool enable_emergency_lockout{true};
+    double throttle_spikes_threshold{0.9};
+    double throttle_cutoff_threshold{0.01};
+    bool allow_vision_attack{true};
+    bool allow_autoland{true};
+
+
   };
 
   /**

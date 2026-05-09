@@ -62,6 +62,9 @@
 #include "los_guidance/gps_parser.hpp"
 
 
+#include <deque>
+#include <chrono>
+
 namespace los_guidance
 {
 
@@ -448,6 +451,17 @@ bool update_acc_setpoint_{false};
     };
     ManualInput manual_input_;
 
+    // === Manual control state for filtering ===
+    struct FilteredManualInput {
+        float roll_filtered{0.0f};
+        float pitch_filtered{0.0f};
+        float yaw_filtered{0.0f};
+        float throttle_filtered{0.5f};
+        std::chrono::steady_clock::time_point last_update;
+        std::deque<std::pair<uint64_t, float>> throttle_spikes_history; // для детекции всплесков
+    };
+    FilteredManualInput filtered_manual_input_;
+
     // === Manual control limits ===
     double max_speed_{3.0};                    // м/с
     double max_vert_speed_{2.0};               // м/с  
@@ -462,7 +476,9 @@ bool update_acc_setpoint_{false};
       UP_TO,             // Подъём на высоту
       DOWN_TO,           // Снижение на высоту
       PATROL_ROUND,      // Круговое патрулирование
-      HOLD_TO_SQUARE     // Удержание позиции в квадрате
+      HOLD_TO_SQUARE,     // Удержание позиции в квадрате
+      VISION_ATTACK,     // Режим визуальной атаки
+      AUTO_LAND          // Автопосадка
     };
     ActiveCommand active_command_ = ActiveCommand::NONE;
     double active_command_param_{0.0};  // Параметр активной команды

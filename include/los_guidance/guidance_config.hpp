@@ -1,19 +1,49 @@
-#ifndef LOS_GUIDANCE_GUIDANCE_CONFIG_HPP_
-#define LOS_GUIDANCE_GUIDANCE_CONFIG_HPP_
+#pragma once
 
 #include <rclcpp/rclcpp.hpp>
-#include <string>
 
 namespace los_guidance {
 
-/**
- * @brief Конфигурация системы наведения LOS
- * 
- * Все параметры вынесены в config/params.yaml
- * Этот класс управляет загрузкой и валидацией параметров
- */
-struct GuidanceConfig {
-    // === Параметры навигации ===
+struct GuidanceConfig
+{
+  // Базовые параметры управления
+  double max_speed_{3.0};                    // м/с
+  double max_vert_speed_{2.0};               // м/с  
+  double max_yaw_rate_{45.0 * M_PI / 180.0}; // рад/с
+
+  // Параметры фильтрации ручного управления
+  double manual_roll_deadzone{0.1};           // Нулевая зона по крену
+  double manual_pitch_deadzone{0.1};          // Нулевая зона по тангажу
+  double manual_yaw_deadzone{0.1};            // Нулевая зона по рысканью
+  double manual_throttle_deadzone{0.05};      // Нулевая зона по газу
+
+  // Ограничения скорости изменения (для плавности)
+  double max_roll_slew_rate{2.0};             // Максимальная скорость изменения roll (ед/с)
+  double max_pitch_slew_rate{2.0};            // Максимальная скорость изменения pitch (ед/с)
+  double max_yaw_slew_rate{60.0 * M_PI / 180.0}; // Максимальная скорость изменения yaw (рад/с)
+  double max_throttle_slew_rate{1.0};         // Максимальная скорость изменения throttle (ед/с)
+
+  // Фильтр низких частот (первый порядок)
+  double manual_filter_time_constant{0.2};    // Время нарастания (сек), 0 = выкл
+
+  // Аварийные блокировки
+  bool enable_emergency_lockout{true};         // Включить режим блокировки при опасных сигналах
+  double throttle_cutoff_threshold{0.01};     // Порог отключения двигателя (низкий газ)
+  double throttle_spikes_threshold{0.9};      // Порог блокировки резких всплесков газа
+  double spike_filter_time_window{0.1};       // Окно фильтрации всплесков (с)
+
+  // Режимы плавности (как у корабля)
+  bool enable_ship_mode{true};                 // Включить медленный отклик
+  double ship_mode_response_factor{0.3};       // Фактор замедления (0.1 = очень медленно, 1.0 = нормально)
+
+  // Параметры переключения режимов
+  bool allow_vision_attack{true};             // Разрешить режим визуальной атаки
+  bool allow_autoland{true};                   // Разрешить автопосадку
+
+
+
+
+      // === Параметры навигации ===
     double kp_yaw{0.5};           // Пропорциональный коэффициент yaw
     double kp_thrust{0.1};        // Пропорциональный коэффициент тяги
     double kp_pitch{0.1};         // Пропорциональный коэффициент pitch
@@ -68,25 +98,39 @@ struct GuidanceConfig {
     double forward_speed{3.0};      // Скорость движения вперёд (м/с)
     double z_still_eps{0.03};       // Порог неподвижности по Z (м)
     
-    /**
-     * @brief Загрузка параметров из ROS2 параметров
-     * @param node ROS2 node для получения параметров
-     */
-    void loadFromROS(rclcpp::Node* node);
+
+
+
+    // // === Параметры ручного управления (добавить в конец структуры) ===
+    // // Deadzones
+    // float manual_roll_deadzone{0.05f};
+    // float manual_pitch_deadzone{0.05f};
+    // float manual_yaw_deadzone{0.05f};
+    // float manual_throttle_deadzone{0.05f};
+
+    // // Slew rate limits (ед/сек)
+    // float max_roll_slew_rate{2.0f};
+    // float max_pitch_slew_rate{2.0f};
+    // float max_yaw_slew_rate{2.0f};
+    // float max_throttle_slew_rate{2.0f};
+
+    // // Filter constants
+    // float manual_filter_time_constant{0.1f};  // seconds
+    // float ship_mode_response_factor{1.0f};     // response multiplier
+
+    // // Emergency safety
+    // float spike_filter_time_window{0.5f};      // seconds
+    // bool enable_emergency_lockout{true};
+    // float throttle_spikes_threshold{0.9f};
+    // float throttle_cutoff_threshold{0.1f};
+
+    // // Feature flags
+    // bool allow_vision_attack{true};
+    // bool allow_autoland{true};
+
     
-    /**
-     * @brief Валидация параметров
-     * @return true если все параметры корректны
-     */
-    bool validate() const;
-    
-    /**
-     * @brief Логирование текущей конфигурации
-     * @param logger ROS2 logger
-     */
-    void logConfig(rclcpp::Logger logger) const;
+  // Загрузка параметров из ноды
+  void loadFromNode(const rclcpp::Node::SharedPtr& node);
 };
 
-}  // namespace los_guidance
-
-#endif  // LOS_GUIDANCE_GUIDANCE_CONFIG_HPP_
+} // namespace los_guidance
