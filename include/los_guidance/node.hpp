@@ -228,6 +228,7 @@ namespace los_guidance
   private:
     // === Инициализация ===
 
+    void softReset();
 
     void uartGpsCallback();
 

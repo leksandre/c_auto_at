@@ -558,6 +558,7 @@ namespace los_guidance
             {
               RCLCPP_WARN(this->get_logger(), "⚠️ Aborting takeoff due to DISARM");
               takeoff_abort_ = true;
+              this->softReset(); //   сброс всех параметров!!!!!!!!
             }
           },
           // 🆕 Колбэк для приземления
@@ -645,7 +646,7 @@ namespace los_guidance
             // Лог с троттлингом
             static uint64_t log_ts = 0;
             now_us = this->get_clock()->now().nanoseconds() / 1000;
-            if (now_us - log_ts > 100000) {  // 500 мс = 500'000 мкс
+            if (now_us - log_ts > 1500000) {  // 500 мс = 500'000 мкс
                 log_ts = now_us;
                 RCLCPP_INFO(this->get_logger(), "📥 MANUAL CB@@@!!!!!!!: r=%.2f p=%.2f y=%.2f t=%.2f | Phase=%d",
                     manual_input_.roll.load(), manual_input_.pitch.load(),
@@ -709,13 +710,16 @@ namespace los_guidance
                 new_throttle_filtered = filtered_manual_input_.throttle_filtered + 
                                         std::copysign(max_throttle_delta, throttle_delta);
             }
-            // 🔒 Блокировка сброса в ноль и резкой перегазовки
-            if (manual_input_.throttle < 0.1f || manual_input_.throttle > 0.9f) {
-                RCLCPP_WARN(this->get_logger(), "🛑 ОПАСНЫЙ ВВОД: Слишком низкий или высокий газ, команда игнорируется");
-                new_throttle_filtered = filtered_manual_input_.throttle_filtered; // Сохраняем предыдущее значение
-            } else {
-                filtered_manual_input_.throttle_filtered = new_throttle_filtered;
-            }
+
+            // // 🔒 Блокировка сброса в ноль и резкой перегазовки
+            // if (manual_input_.throttle < 0.1f || manual_input_.throttle > 0.9f) {
+            //   if ( manual_input_.throttle > 0.9f){
+            //     RCLCPP_WARN(this->get_logger(), "🛑 ОПАСНЫЙ ВВОД: Слишком высокий газ, команда игнорируется");
+            //   }
+            //     new_throttle_filtered = filtered_manual_input_.throttle_filtered; // Сохраняем предыдущее значение
+            // } else {
+            //     filtered_manual_input_.throttle_filtered = new_throttle_filtered;
+            // }
 
             // Обнаружение опасных всплесков дросселя
             uint64_t now_us_timestamp = now_us;
@@ -785,7 +789,8 @@ namespace los_guidance
                 //     static_cast<int>(auto_phase_));
                     
             // === 4. Публикация (только если не в авто-режиме) ===
-            if (auto_phase_ == AutoPhase::IDLE && active_command_ == ActiveCommand::NONE) {}
+            // if (auto_phase_ == AutoPhase::IDLE && active_command_ == ActiveCommand::NONE) {}
+            
               // Отправляем комбинированный setpoint
               px4_msgs::msg::TrajectorySetpoint ts;
               ts.position = {NAN, NAN, NAN};
@@ -3494,4 +3499,57 @@ namespace los_guidance
     RCLCPP_DEBUG(this->get_logger(), "✓ All parameters declared successfully");
   }
 
+
+
+void Node::softReset()
+{
+    RCLCPP_WARN(this->get_logger(), "🔄 SOFT RESET: Clearing all states...");
+    
+    // 1. Блокируем всё
+    emergency_stop_ = true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // 2. Сброс контроллеров (безопасно, т.к. они используют свои mutex)
+    if (guidance_ctrl_) guidance_ctrl_->reset();
+    if (los_estimator_) los_estimator_->reset();
+    if (target_tracker_) target_tracker_->reset();
+
+    // 3. Очистка состояния
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    auto_phase_ = AutoPhase::IDLE;
+    start_attack_ = false;
+    attack_enabled_ = false;
+    attack_ready_.store(false, std::memory_order_release);
+    takeoff_running_ = false;
+    takeoff_abort_ = false;
+    active_command_ = ActiveCommand::NONE;
+    active_command_param_ = 0.0;
+    closest_target_ip_.clear();
+    ref_gps_valid_ = false;
+    
+    // 4. Сброс ручного управления
+    manual_input_.roll = 0.0f;
+    manual_input_.pitch = 0.0f;
+    manual_input_.yaw = 0.0f;
+    manual_input_.throttle = 0.5f;
+    manual_input_.updated.store(false, std::memory_order_release);
+    filtered_manual_input_ = FilteredManualInput();
+
+    // 5. Публикация безопасного setpoint (PX4 не будет падать по offboard timeout)
+    px4_msgs::msg::TrajectorySetpoint safe_ts;
+    safe_ts.position = {NAN, NAN, NAN};
+    safe_ts.velocity = {NAN, NAN, NAN};
+    safe_ts.acceleration = {NAN, NAN, NAN};
+    safe_ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+    trajectory_setpoint_pub_->publish(safe_ts);
+    vehicle_ctrl_->publishOffboardControlMode();
+
+    // 6. Снимаем аварийную остановку через 100 мс
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    emergency_stop_ = false;
+    RCLCPP_INFO(this->get_logger(), "✅ SOFT RESET complete. System IDLE.");
+}
+
+
 } // namespace los_guidance
+
