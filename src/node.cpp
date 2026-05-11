@@ -747,7 +747,7 @@ namespace los_guidance
                 // return; // Блокировка опасных команд
             } else {
 
-              if (auto_phase_ != AutoPhase::IDLE)
+              if (auto_phase_ != AutoPhase::IDLE)//костыль, ну а хели делать
               {
                 RCLCPP_WARN(this->get_logger(), "🛑 переключение AutoPhase::IDLE");
                 
@@ -1499,7 +1499,7 @@ namespace los_guidance
       auto_phase_ = AutoPhase::IDLE;
     }
 
-    RCLCPP_INFO(this->get_logger(), "Attack signal: %s", start_attack_ ? "START" : "STOP");
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 22000, "Attack signal: %s", start_attack_ ? "START" : "STOP");
   }
 
   void Node::autoAttackService(
