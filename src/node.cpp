@@ -418,8 +418,9 @@ namespace los_guidance
 
             if (start)
             {
-              start_attack_ = true;
-              attack_enabled_ = true;
+
+              // start_attack_ = true;
+              // attack_enabled_ = true;
               guidance_ctrl_->setAttackMode(true); // 🆕 Явный старт режима в контроллере
               RCLCPP_INFO(this->get_logger(), "🎯 Attack STARTED via TCP command");
 
@@ -429,7 +430,9 @@ namespace los_guidance
               // }
 
               auto_phase_ = AutoPhase::VISUAL_ATTACK;
-
+              active_command_ = ActiveCommand::VISION_ATTACK;
+              start_attack_ = true; 
+              attack_enabled_ = true;
 
             }
             else
@@ -1495,11 +1498,21 @@ namespace los_guidance
 
     if (start_attack_){
       auto_phase_ = AutoPhase::VISUAL_ATTACK;
+      active_command_ = ActiveCommand::VISION_ATTACK;
+        start_attack_ = true; 
+        attack_enabled_ = true;
+        guidance_ctrl_->setAttackMode(true); 
     } else {
       auto_phase_ = AutoPhase::IDLE;
+      active_command_ = ActiveCommand::NONE;
+        start_attack_ = false; 
+        attack_enabled_ = false;
+        guidance_ctrl_->setAttackMode(false); 
     }
 
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 22000, "Attack signal: %s", start_attack_ ? "START" : "STOP");
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 7000, "Attack signal: %s", start_attack_ ? "START" : "STOP");
+
+    //  RCLCPP_INFO(this->get_logger(), "Attack signal: %s", start_attack_ ? "START" : "STOP");
   }
 
   void Node::autoAttackService(
@@ -1512,6 +1525,7 @@ namespace los_guidance
     {
       attack_enabled_ = request->data;
       response->success = true;
+      
       response->message = attack_enabled_ ? "Auto attack START" : "Auto attack STOP";
       RCLCPP_INFO(this->get_logger(), "%s", response->message.c_str());
     }
