@@ -433,6 +433,21 @@ namespace los_guidance
               active_command_ = ActiveCommand::VISION_ATTACK;
               start_attack_ = true; 
               attack_enabled_ = true;
+              attack_ready_.store(true, std::memory_order_release);
+
+              // if (vehicle_ctrl_->getCurrentMode() != FlightMode::OFFBOARD){
+              //       RCLCPP_INFO(this->get_logger(), "📡 Switching to OFFBOARD mode...");
+              //       for (int i = 0; i < 20; ++i)
+              //       {
+              //         vehicle_ctrl_->setOffboardMode();
+              //         vehicle_ctrl_->publishOffboardControlMode();
+              //         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+              //       }
+              //       std::this_thread::sleep_for(std::chrono::seconds(1));
+              // }
+
+
+
 
             }
             else
@@ -1961,6 +1976,17 @@ namespace los_guidance
 
           RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
                                "----------should_attack");
+
+              // if (vehicle_ctrl_->getCurrentMode() != FlightMode::OFFBOARD){
+              //       RCLCPP_INFO(this->get_logger(), "📡 Switching to OFFBOARD mode...");
+              //       for (int i = 0; i < 30; ++i)
+              //       {
+              //         vehicle_ctrl_->setOffboardMode();
+              //         vehicle_ctrl_->publishOffboardControlMode();
+              //         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+              //       }
+              //       std::this_thread::sleep_for(std::chrono::seconds(1));
+              // }
 
           if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD)
           {
