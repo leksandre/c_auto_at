@@ -60,6 +60,7 @@ los_guidance_node:
       enable_PI_control: true      # ✅ ВКЛЮЧИТЬ для тяжёлого
       enable_acceleration_parallel: false
       top_attack_mode: false
+      timeout_for_centr_target: 2.0  # Время (сек) для центрирования цели перед подачей ускорения вперед
       
       # 🆕 Компенсация ЦТ (если сместился)
       cg_trim_pitch_deg: 2.5       # Настроить экспериментально

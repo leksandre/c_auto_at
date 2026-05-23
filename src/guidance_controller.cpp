@@ -59,6 +59,25 @@ namespace los_guidance
     double Vc = estimateVcFromPitch(pitch_rad, config_.max_lat_acc / CONSTANTS_ONE_G);
     output.Vc_estimate = Vc;
 
+    // Управление фазой центрирования
+    if (centering_active_)
+    {
+      if (centering_start_time_ == 0.0)
+      {
+        // Начало отсчета времени при первом вызове после начала атаки
+        centering_start_time_ = rclcpp::Clock().now().seconds();
+      }
+      else
+      {
+        double elapsed_time = rclcpp::Clock().now().seconds() - centering_start_time_;
+        if (elapsed_time >= config_.timeout_for_centr_target)
+        {
+          RCLCPP_INFO(rclcpp::get_logger("guidance_ctrl"), "Centring phase completed. Forward acceleration enabled.");
+          centering_active_ = false; // Завершаем фазу центрирования
+        }
+      }
+    }
+
     // Выбор алгоритма наведения
     Eigen::Vector3d acc_cmd;
     if (config_.enable_PI_control)
@@ -78,8 +97,8 @@ namespace los_guidance
       acc_cmd = config_.pn_gain_N * Vc * lambda.cross(u_los);
     }
 
-    // Добавление parallel acceleration (для увеличения Vc)
-    if (config_.enable_acc_parallel)
+    // Добавление parallel acceleration (для увеличения Vc) только после завершения центрирования
+    if (config_.enable_acc_parallel && !centering_active_)
     {
       acc_cmd = addParallelAcceleration_(acc_cmd, u_los, Vc, dt_);
     }
@@ -264,6 +283,10 @@ namespace los_guidance
 
     // Сброс отладки
     debug_info_ = GuidanceDebug();
+
+    // Сброс состояний для отложенного ускорения
+    centering_active_ = true;
+    centering_start_time_ = 0.0;
   }
 
   void GuidanceController::updateConfig(const GuidanceConfig &config)

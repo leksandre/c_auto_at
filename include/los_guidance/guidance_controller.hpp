@@ -78,6 +78,7 @@ namespace los_guidance
 
     // === Режимы ===
     bool enable_PI_control{false};
+    bool timeout_for_centr_target{false};
     bool top_attack_mode{false};
     bool enable_acc_parallel{false};
 
@@ -324,6 +325,10 @@ namespace los_guidance
     // === Константы ===
     static constexpr double CONSTANTS_ONE_G = 9.80665;
     static constexpr double EPSILON = 1e-6;
+
+    // === Состояния для отложенного ускорения ===
+    bool centering_active_{true}; // Флаг, что мы все еще в фазе центрирования
+    double centering_start_time_{0.0}; // Время начала центрирования
 
     // === Внутренние методы ===
 

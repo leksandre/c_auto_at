@@ -117,6 +117,7 @@ namespace los_guidance
     this->declare_parameter("guidance.enable_PI_control", false);
     this->declare_parameter("guidance.top_attack_mode", false);
     this->declare_parameter("guidance.enable_acceleration_parallel", false);
+    this->declare_parameter("guidance.timeout_for_centr_target", 2.0);  // Время (сек) для центрирования цели перед подачей ускорения вперед
     this->declare_parameter("kalman.use_gyro_compensation", false);
     this->declare_parameter("sync.debug", false);
     // Дистанция для перехода в визуальную атаку
