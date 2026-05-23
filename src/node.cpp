@@ -1262,12 +1262,14 @@ namespace los_guidance
         // 🎯 Расчёт ускорения через GuidanceController
         // double Vc = guidance_ctrl_->estimateVc(pitch, config_.max_tilt_deg * DEG2RAD);
 
+        // GuidanceOutput output = guidance_ctrl_->computeAccelerationWithVc(
         GuidanceOutput output = guidance_ctrl_->computeAcceleration(
             u_los,
             lambda,
             pitch, // ← 3-й параметр pitch_rad, не Vc!
             yaw);
         Eigen::Vector3d acc_cmd = output.acceleration_cmd;
+        //Eigen::Vector3d acc_cmd = Eigen::Vector3d::Zero();
 
         // === 🪵 Лог команды ускорения ===
         if (config_.debug)
@@ -1283,7 +1285,17 @@ namespace los_guidance
 
         // 🎯 Lock-free сохранение команды для timer callback (без mutex!)
         // ✅ AI callback работает полностью независимо — никакого блокирования
-        latest_acc_cmd_.acc_cmd = acc_cmd;
+
+
+        // latest_acc_cmd_.acc_cmd = acc_cmd;
+
+        //делаем плавное ускорение
+        static Eigen::Vector3d smooth_acc = Eigen::Vector3d::Zero();
+        double alpha = 0.1; // 10% за шаг
+        smooth_acc = smooth_acc * (1 - alpha) + acc_cmd * alpha;
+        latest_acc_cmd_.acc_cmd = smooth_acc;
+
+
         latest_acc_cmd_.confidence = target.confidence;
         latest_acc_cmd_.timestamp_us = msg->timestamp / 1000; // ns → us
         latest_acc_cmd_.is_valid = true;
@@ -1368,6 +1380,11 @@ namespace los_guidance
 
     auto sync_msg = sensor_sync_->sync(ref_us);
 
+
+
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms, "🔍 trackBBox2DCallback 11: ref_us=%lu", ref_us);
+
+
     Eigen::Quaterniond quat;
     Eigen::Vector3d omega_b;
     bool quat_ready = false;
@@ -1384,6 +1401,22 @@ namespace los_guidance
       omega_b = *std::static_pointer_cast<Eigen::Vector3d>(sync_msg[ang_rate_sync_key_]);
       gyro_ready = true;
     }
+
+
+     // RCLCPP_INFO(this->get_logger(), "   quat_ready=%d, gyro_ready=%d", quat_ready, gyro_ready);
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms, "   quat_ready=%d, gyro_ready=%d", quat_ready, gyro_ready);
+
+    // === 🪵 Лог синхронизации ===
+    if (config_.debug)
+    {
+      // RCLCPP_DEBUG(this->get_logger(),
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
+                           "🔗 Sync: trackBBox2DCallback 22:  quat=%d, gyro=%d, ref_us=%lu",
+                           quat_ready ? 1 : 0,
+                           gyro_ready ? 1 : 0,
+                           ref_us);
+    }
+
 
     if (quat_ready && gyro_ready)
     {
@@ -1402,6 +1435,20 @@ namespace los_guidance
           roll,
           pitch,
           R_nb);
+
+
+                // === 🪵 Лог результата трекинга ===
+      if (config_.debug)
+      {
+        // RCLCPP_DEBUG(this->get_logger(),
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
+                             "🎯 Target: trackBBox2DCallback 33:  pixel=(%.1f,%.1f)→(%.1f,%.1f), conf=%.3f, valid=%d",
+                             target.pixel_u, target.pixel_v,
+                             target.pixel_u_smooth, target.pixel_v_smooth,
+                             target.confidence,
+                             target.is_valid ? 1 : 0);
+      }
+
 
       // if (target.is_valid) {
       //   // los_estimator_->predict(config_.update_ms / 1000.0, omega_b);
@@ -1438,6 +1485,7 @@ namespace los_guidance
             pitch,
             yaw);
         Eigen::Vector3d acc_cmd = output.acceleration_cmd; // ← Получить из output
+        //Eigen::Vector3d acc_cmd = Eigen::Vector3d::Zero();
 
         publishLosStatus(target, acc_cmd);
 
@@ -1966,11 +2014,12 @@ namespace los_guidance
         if (new_acc_cmd_available_.load(std::memory_order_acquire))
         {
           acc_cmd = latest_acc_cmd_.acc_cmd;
+          //acc_cmd = Eigen::Vector3d::Zero();
           new_acc_cmd_available_.store(false, std::memory_order_release);
         }
 
         // Цель видима — выполняем визуальную атаку
-        bool should_attack = (start_attack_ || attack_enabled_);
+        bool should_attack = (start_attack_ && attack_enabled_);
         if (should_attack)
         {
 
