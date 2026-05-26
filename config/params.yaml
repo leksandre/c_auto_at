@@ -16,7 +16,7 @@ los_guidance_node:
       altitude_threshold_m: 1.5 
       min_altitude_already_flying_m: 2.0 
       min_cycles_for_already_flying: 120 
-      skip: false                    # Пропуск взлёта
+      skip: true                    # Пропуск взлёта
       visual_searching: true         # 🔍 Визуальный поиск после взлёта
       visual_search_timeout_s: 300   # ⏰ 5 минут ожидания
       timeout_s: 5 # 20 секунд для нормального взлёта
@@ -34,7 +34,7 @@ los_guidance_node:
       # Установка камеры
       install:
         roll_deg: 0.0
-        pitch_deg: 5.0
+        pitch_deg: -15.0
         yaw_deg: 0.0
       
       # Фильтрация ⬇️ УВЕЛИЧЕНО для тяжёлого дрона
