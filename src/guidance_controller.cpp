@@ -497,11 +497,16 @@ namespace los_guidance
   {
     Eigen::Vector3d acc_clamped;
 
+    // Логирование значений масштабирования
+    // RCLCPP_INFO(rclcpp::get_logger("guidance_controller"), "Clamp modifications - x: %.3f, y: %.3f, z: %.3f", 
+    //             config_.clamp_modifications_scale_x, 
+    //             config_.clamp_modifications_scale_y, 
+    //             config_.clamp_modifications_scale_z);
+
     // 🆕 Динамическое ограничение с учётом массы
     double mass_factor = config_.accel_scale; // = 0.62 для 2519г
 
-    acc_clamped.x() = acc.x()*2; // здесь константа   
-    
+    acc_clamped.x() = clamp_(acc.x() * config_.clamp_modifications_scale_x, 2.0 , 9.9);
     // acc_clamped.x() = clamp_(
     //     acc.x()
     //     ,
@@ -509,8 +514,7 @@ namespace los_guidance
     //     config_.max_hor_acc * mass_factor
     //   );
 
-    acc_clamped.y() = acc.y();
-    
+    acc_clamped.y() = clamp_(acc.y() * config_.clamp_modifications_scale_y, 0.01, 9.9);
     // acc_clamped.y() = clamp_(
     //     acc.y()
     //     ,
@@ -519,7 +523,7 @@ namespace los_guidance
     //   );
     
     acc_clamped.z() = clamp_(
-        acc.z(),
+        acc.z() * config_.clamp_modifications_scale_z,
         config_.max_up_acc * mass_factor,
         config_.max_down_acc * mass_factor);
 

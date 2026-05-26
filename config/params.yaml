@@ -191,3 +191,9 @@ los_guidance_node:
       # === Разрешение специальных команд ===
       allow_vision_attack: true        # Разрешить переход в режим VISUAL_ATTACK по TCP-команде.
       allow_autoland: true             # Разрешить запуск режима AUTO_LAND по TCP-команде.
+    
+    # === Clamp Modifications ===
+    clamp_modifications:
+      scale_x: 3.0
+      scale_y: 1.0
+      scale_z: 0.4

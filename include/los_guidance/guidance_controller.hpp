@@ -95,7 +95,7 @@ namespace los_guidance
     double mass_old_g{1562.0}; // Старая масса (граммы)
     double mass_new_g{2519.0}; // Новая масса (граммы)
     double mass_ratio{1.61};   // = mass_new / mass_old
-    double accel_scale{0.12};  // = 1/mass_ratio // ПОКА ПРИМЕНЯЕМ ДЛЯ ЗЭТ ВЕЛИЧИНЫ ТОЛЬКО
+    double accel_scale{0.62};  // = 1/mass_ratio // ПОКА ПРИМЕНЯЕМ ДЛЯ ЗЭТ ВЕЛИЧИНЫ ТОЛЬКО
     double pid_scale{0.79};    // = sqrt(1/mass_ratio)
 
     // 🆕 Компенсация ЦТ
@@ -120,6 +120,15 @@ namespace los_guidance
     double throttle_cutoff_threshold{0.01};
     bool allow_vision_attack{true};
     bool allow_autoland{true};
+
+
+
+        // === Параметры масштабирования ускорения (clamp) ===
+    double clamp_modifications_scale_x{1.0};           // Множитель масштабирования для X оси
+    double clamp_modifications_scale_y{1.0};           // Множитель масштабирования для Y оси
+    double clamp_modifications_scale_z{1.0};           // Множитель масштабирования для Z оси
+    
+
 
 
   };

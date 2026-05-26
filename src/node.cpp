@@ -261,6 +261,34 @@ namespace los_guidance
 
     // === Search mode params ===
 
+
+
+
+
+      // === Параметры масштабирования ускорения (clamp) ===
+  this->declare_parameter("clamp_modifications.scale_x", 1.0);
+  // this->get_parameter("clamp_modifications.scale_x", clamp_modifications_scale_x);
+
+  this->declare_parameter("clamp_modifications.scale_y", 1.0);
+  // this->get_parameter("clamp_modifications.scale_y", clamp_modifications_scale_y);
+
+  this->declare_parameter("clamp_modifications.scale_z", 1.0);
+  // this->get_parameter("clamp_modifications.scale_z", clamp_modifications_scale_z);
+
+
+
+    config_.clamp_modifications_scale_x = this->get_parameter("clamp_modifications.scale_x").as_double();
+    config_.clamp_modifications_scale_y = this->get_parameter("clamp_modifications.scale_y").as_double();
+    config_.clamp_modifications_scale_z = this->get_parameter("clamp_modifications.scale_z").as_double();
+
+    guidance_config_.clamp_modifications_scale_x = this->get_parameter("clamp_modifications.scale_x").as_double();
+    guidance_config_.clamp_modifications_scale_y = this->get_parameter("clamp_modifications.scale_y").as_double();
+    guidance_config_.clamp_modifications_scale_z = this->get_parameter("clamp_modifications.scale_z").as_double();
+    
+    
+    
+
+
     // === Commander параметры (moved from loadParameters) ===
     this->declare_parameter("commander.enable", false);
     this->declare_parameter("commander.port", 11472);

@@ -176,6 +176,23 @@ namespace los_guidance
     double manual_control_max_accel_mps2{1.86};
     double manual_control_max_yaw_rate_dps{45.0};
     double manual_control_max_vert_speed_mps{2.0};
+
+
+    
+
+        // === Параметры масштабирования ускорения (clamp) ===
+    double clamp_modifications_scale_x{1.0};           // Множитель масштабирования для X оси
+    double clamp_modifications_scale_y{1.0};           // Множитель масштабирования для Y оси
+    double clamp_modifications_scale_z{1.0};           // Множитель масштабирования для Z оси
+    
+
+
+
+
+
+    
+
+
   };
 
   /**
