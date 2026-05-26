@@ -1273,7 +1273,7 @@ namespace los_guidance
         if (config_.debug)
         {
           // RCLCPP_DEBUG(this->get_logger(),
-          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2500,
                                "🚀 Acc cmd: trackerResultCallback 66:  [%.3f, %.3f, %.3f] m/s²",
                                acc_cmd.x(), acc_cmd.y(), acc_cmd.z());
         }
@@ -1955,7 +1955,7 @@ namespace los_guidance
       else
       {
 
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1500,
                              "🔍 TIMER: phase=%d, ready=%d, should_attack=%d",
                              (int)auto_phase_,
                              attack_ready_.load() ? 1 : 0,
@@ -1974,7 +1974,7 @@ namespace los_guidance
         if (should_attack)
         {
 
-          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3500,
                                "----------should_attack");
 
               // if (vehicle_ctrl_->getCurrentMode() != FlightMode::OFFBOARD){
@@ -1991,7 +1991,7 @@ namespace los_guidance
           if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD)
           {
 
-            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3500,
                                  "----------FlightMode::OFFBOARD");
 
             update_acc_setpoint_ = true;

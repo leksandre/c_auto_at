@@ -55,8 +55,12 @@ namespace los_guidance
       return output;
     }
 
-    // Оценка скорости на основе тангажа
-    double Vc = estimateVcFromPitch(pitch_rad, config_.max_lat_acc / CONSTANTS_ONE_G);
+    // При старте атаки устанавливаем фиксированную начальную скорость 0.3 м/с
+    // чтобы инициировать движение сразу, даже если дрон завис или на земле.
+    // После первого цикла используется оценка на основе тангажа.
+  //    double Vc = estimateVcFromPitch(pitch_rad, config_.max_lat_acc / CONSTANTS_ONE_G);
+  
+    double Vc = 0.3; // здесь константа   
     output.Vc_estimate = Vc;
 
     // Выбор алгоритма наведения
@@ -85,7 +89,7 @@ namespace los_guidance
     }
 
     // Ограничение ускорений
-    acc_cmd = clampAcceleration_(acc_cmd);
+    acc_cmd = clampAcceleration_(acc_cmd); // будем ограничивать только по зэту
 
     // Трансформация в навигационную систему
     output.acceleration_cmd = transformAccToNav_(acc_cmd, yaw_rad);
@@ -496,14 +500,24 @@ namespace los_guidance
     // 🆕 Динамическое ограничение с учётом массы
     double mass_factor = config_.accel_scale; // = 0.62 для 2519г
 
-    acc_clamped.x() = clamp_(
-        acc.x(),
-        -config_.max_hor_acc * mass_factor,
-        config_.max_hor_acc * mass_factor);
-    acc_clamped.y() = clamp_(
-        acc.y(),
-        -config_.max_hor_acc * mass_factor,
-        config_.max_hor_acc * mass_factor);
+    acc_clamped.x() = acc.x()*2; // здесь константа   
+    
+    // acc_clamped.x() = clamp_(
+    //     acc.x()
+    //     ,
+    //     -config_.max_hor_acc * mass_factor,
+    //     config_.max_hor_acc * mass_factor
+    //   );
+
+    acc_clamped.y() = acc.y();
+    
+    // acc_clamped.y() = clamp_(
+    //     acc.y()
+    //     ,
+    //     -config_.max_hor_acc * mass_factor,
+    //     config_.max_hor_acc * mass_factor
+    //   );
+    
     acc_clamped.z() = clamp_(
         acc.z(),
         config_.max_up_acc * mass_factor,
@@ -521,7 +535,7 @@ namespace los_guidance
     (void)dt;
     // Parallel acceleration для увеличения Vc
     double acc_parallel = config_.acc_parallel_gain * (config_.max_vc - Vc);
-    acc_parallel = acc_parallel_pre_ + config_.acc_parallel_alpha * (acc_parallel - acc_parallel_pre_);
+    acc_parallel = acc_parallel_pre_ + config_.acc_parallel_alpha * 2 * (acc_parallel - acc_parallel_pre_); // здесь константа   
     acc_parallel = clamp_(acc_parallel, 0.0, config_.max_acc_parallel);
     acc_parallel_pre_ = acc_parallel;
 
@@ -570,16 +584,24 @@ namespace los_guidance
     // Можно хранить состояние, если нужно
     // config_.enable_attack_mode = enable;
 
-    if (!enable)
+
+    if (enable)
+    {
+      // При включении атаки РЕЗКО увеличиваем целевое ускорение вперед
+      // для мощного рывка к цели. config_.max_acc_parallel теперь 5.0
+      // acc_parallel_pre_ = config_.max_acc_parallel; // Резкий старт
+      // RCLCPP_INFO(rclcpp::get_logger("guidance_ctrl"), "Attack mode enabled! POWERFUL thrust initiated.");
+    }
+    else
     {
       // При отключении атаки сбрасываем интеграторы и ошибки
       los_err_int_y_ = 0.0;
-      los_err_int_z_ = 0.0;
+      // los_err_fnt_z_ = 0.0;
       intercept_x_int_ = 0.0;
       intercept_y_int_ = 0.0;
       // ... другие сбросы ...
 
-        RCLCPP_DEBUG(rclcpp::get_logger("guidance_ctrl"), "Attack mode disabled, states reset.");
+      RCLCPP_DEBUG(rclcpp::get_logger("guidance_ctrl"), "Attack mode disabled, states reset.");
 
     }
   }
