@@ -540,6 +540,10 @@ bool update_acc_setpoint_{false};
     bool ref_gps_valid_ = false;
     Eigen::Vector3d target_ned_ = Eigen::Vector3d::Zero();
 
+    // 🆕 Последняя валидная NED-позиция дрона (для fallback при потере GPS)
+    Eigen::Vector3d last_hover_ned_ = Eigen::Vector3d::Zero();
+    bool last_hover_ned_valid_{false};
+
     // 🆕 Таймер входа в VISUAL_ATTACK (для fallback в GPS_APPROACH через 2с при потере цели)
     std::chrono::steady_clock::time_point visual_attack_entry_time_;
     bool visual_attack_timer_active_{false};

@@ -1272,6 +1272,29 @@ namespace los_guidance
     los_estimator_->predict(config_.update_ms / 1000.0, omega_b, R_nb);
     los_estimator_->update(target.los_nav);
 
+    // 🆕 Валидация Kalman filter: проверяем сходимость
+    bool kf_converged = los_estimator_->isConverged();
+    if (!kf_converged)
+    {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                           "⚠️ Kalman filter NOT converged yet — skipping acceleration computation");
+      // Публикуем статус с флагом невалидности, но не устанавливаем attack_ready_
+      publishLosStatus(target, Eigen::Vector3d::Zero());
+      return;
+    }
+
+    // 🆕 Проверка нормы инновации (residual) — защита от выбросов
+    LosEstimatorDebug debug_info = los_estimator_->getDebugInfo();
+    const double MAX_RESIDUAL_NORM = 2.0; // Максимальная допустимая норма остатка
+    if (debug_info.residual_norm > MAX_RESIDUAL_NORM)
+    {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                           "⚠️ KF residual too large (%.3f > %.1f) — rejecting measurement",
+                           debug_info.residual_norm, MAX_RESIDUAL_NORM);
+      publishLosStatus(target, Eigen::Vector3d::Zero());
+      return;
+    }
+
     // 🎯 Получение оценённых LOS и lambda
     Eigen::Vector3d u_los = los_estimator_->getLosVector();
     Eigen::Vector3d lambda = los_estimator_->getLosAngularVelocity();
@@ -1312,13 +1335,15 @@ namespace los_guidance
     latest_acc_cmd_.is_valid = true;
     new_acc_cmd_available_.store(true, std::memory_order_release);
 
-    // Атомарно устанавливаем attack_ready (без mutex)
+    // 🆕 Устанавливаем attack_ready ТОЛЬКО если KF сошёлся и residual в норме
     attack_ready_.store(true, std::memory_order_release);
 
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
-                         "✅ AI Thread: attack_ready_=true | conf=%.2f | acc=[%.2f,%.2f,%.2f]",
+                         "✅ AI Thread: attack_ready_=true | conf=%.2f | acc=[%.2f,%.2f,%.2f] | KF: conv=%d, res=%.3f",
                          target.confidence,
-                         acc_cmd.x(), acc_cmd.y(), acc_cmd.z());
+                         acc_cmd.x(), acc_cmd.y(), acc_cmd.z(),
+                         kf_converged ? 1 : 0,
+                         debug_info.residual_norm);
   }
 
   bool Node::syncAndGetOrientation_(
@@ -1991,6 +2016,33 @@ namespace los_guidance
       bool target_seen = attack_ready_.load(std::memory_order_acquire);
 
       // === 2. Публикуем setpoint: зависание на месте + yaw control ===
+      // 🆕 Константа скорости вращения при сканировании (град/с)
+      const double SEARCH_YAW_RATE_DPS = 15.0; // 15 градусов в секунду
+
+      // Yaw rate: вращаемся, чтобы держать цель в центре
+      double yaw_rate_cmd = 0.0;
+      if (target_seen)
+      {
+        // Улучшенное центрирование цели: уменьшаем угловую скорость при приближении к центру
+        double los_cam_y = last_los_cam_y_.load(std::memory_order_relaxed);
+        double error_magnitude = std::abs(los_cam_y);
+        double gain = config_.kp_yaw_track;
+        
+        // Плавное уменьшение коэффициента при приближении к центру
+        if (error_magnitude < 0.1) // Если ошибка меньше 0.1 рад
+        {
+          gain *= (error_magnitude / 0.1); // Плавно снижаем коэффициент
+        }
+        
+        yaw_rate_cmd = -gain * los_cam_y;
+        yaw_rate_cmd = std::clamp(yaw_rate_cmd, -30.0 * DEG2RAD, 30.0 * DEG2RAD);
+      }
+      else
+      {
+        // 🆕 Цель не видна — вращаемся для сканирования местности
+        yaw_rate_cmd = SEARCH_YAW_RATE_DPS * DEG2RAD;
+      }
+
       if (local_drone_gps.is_valid && local_ref_gps_valid)
       {
         // Конвертируем текущую позицию в NED (для зависания)
@@ -1998,26 +2050,14 @@ namespace los_guidance
             local_drone_gps.lat, local_drone_gps.lon, local_drone_gps.alt,
             local_ref_gps.lat, local_ref_gps.lon, local_ref_gps.alt);
 
-        // Yaw rate: вращаемся, чтобы держать цель в центре
-        double yaw_rate_cmd = 0.0;
-        if (target_seen)
+        // 🆕 Сохраняем последнюю валидную NED-позицию для fallback
         {
-          // Улучшенное центрирование цели: уменьшаем угловую скорость при приближении к центру
-          double los_cam_y = last_los_cam_y_.load(std::memory_order_relaxed);
-          double error_magnitude = std::abs(los_cam_y);
-          double gain = config_.kp_yaw_track;
-          
-          // Плавное уменьшение коэффициента при приближении к центру
-          if (error_magnitude < 0.1) // Если ошибка меньше 0.1 рад
-          {
-            gain *= (error_magnitude / 0.1); // Плавно снижаем коэффициент
-          }
-          
-          yaw_rate_cmd = -gain * los_cam_y;
-          yaw_rate_cmd = std::clamp(yaw_rate_cmd, -30.0 * DEG2RAD, 30.0 * DEG2RAD);
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          last_hover_ned_ = hover_ned;
+          last_hover_ned_valid_ = true;
         }
 
-        // Публикуем setpoint
+        // Публикуем position setpoint (зависание)
         px4_msgs::msg::TrajectorySetpoint msg;
         msg.position = {static_cast<float>(hover_ned.x()), static_cast<float>(hover_ned.y()), static_cast<float>(hover_ned.z())};
         msg.velocity = {NAN, NAN, NAN};
@@ -2034,10 +2074,40 @@ namespace los_guidance
                              yaw_rate_cmd * 180.0 / M_PI,
                              target_seen ? "TRACKING" : "SCANNING");
       }
+      else if (last_hover_ned_valid_)
+      {
+        // 🆕 GPS невалиден — используем последнюю известную NED-позицию
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "⚠️ GPS lost in SEARCH mode — using last known position (%.2f, %.2f, %.2f)",
+                             last_hover_ned_.x(), last_hover_ned_.y(), last_hover_ned_.z());
+
+        px4_msgs::msg::TrajectorySetpoint msg;
+        msg.position = {static_cast<float>(last_hover_ned_.x()),
+                        static_cast<float>(last_hover_ned_.y()),
+                        static_cast<float>(last_hover_ned_.z())};
+        msg.velocity = {NAN, NAN, NAN};
+        msg.acceleration = {NAN, NAN, NAN};
+        msg.yaw = NAN;
+        msg.yawspeed = static_cast<float>(yaw_rate_cmd);
+        msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+
+        trajectory_setpoint_pub_->publish(msg);
+      }
       else
       {
+        // 🆕 Нет ни GPS, ни сохранённой позиции — velocity fallback
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                             "⚠️ GPS not valid in SEARCH mode — cannot hover");
+                             "⚠️ No position data in SEARCH mode — using velocity hover");
+
+        px4_msgs::msg::TrajectorySetpoint msg;
+        msg.position = {NAN, NAN, NAN};
+        msg.velocity = {0.0f, 0.0f, 0.0f};
+        msg.acceleration = {NAN, NAN, NAN};
+        msg.yaw = NAN;
+        msg.yawspeed = static_cast<float>(yaw_rate_cmd);
+        msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+
+        trajectory_setpoint_pub_->publish(msg);
       }
 
       // === 3. 🔥 КЛЮЧЕВОЕ: Переход в атаку ТОЛЬКО по команде '{"start_attack": true}' ===

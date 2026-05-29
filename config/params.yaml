@@ -38,7 +38,7 @@ los_guidance_node:
       # Фильтрация ⬇️ УВЕЛИЧЕНО для тяжёлого дрона
       pixel_smooth_alpha: 0.7      # Увеличено для более резкой реакции
       los_smooth_alpha: 0.3        # Увеличено для более резкой реакции
-      min_confidence: 0.6          # ↑ Было 0.5 (строже)
+      min_confidence: 0.4          # ↑ Было 0.5 (строже)
     
     # === Kalman Filter LOS ===
     kalman:
