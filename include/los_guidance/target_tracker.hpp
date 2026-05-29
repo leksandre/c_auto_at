@@ -183,6 +183,10 @@ private:
   Eigen::Vector3d los_nav_history_{Eigen::Vector3d::Zero()};
   uint64_t last_timestamp_us_{0};
   
+  // Сглаживание lambda
+  Eigen::Vector3d lambda_smooth_{Eigen::Vector3d::Zero()};
+  bool lambda_initialized_{false};
+  
   // Статистика
   TrackerStats stats_;
   

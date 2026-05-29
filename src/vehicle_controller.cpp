@@ -624,21 +624,20 @@ namespace los_guidance
   {
     Eigen::Vector3d acc_clamped;
 
-    // 🆕 Для тяжёлого дрона (2519г) - более консервативные лимиты
-    double heavy_drone_factor = 0.62; // = 1562/2519
+    const double hf = config_.heavy_drone_factor;
 
     acc_clamped.x() = std::clamp(
         acc.x(),
-        -config_.max_hor_acc_limit * heavy_drone_factor,
-        config_.max_hor_acc_limit * heavy_drone_factor);
+        -config_.max_hor_acc_limit * hf,
+        config_.max_hor_acc_limit * hf);
     acc_clamped.y() = std::clamp(
         acc.y(),
-        -config_.max_hor_acc_limit * heavy_drone_factor,
-        config_.max_hor_acc_limit * heavy_drone_factor);
+        -config_.max_hor_acc_limit * hf,
+        config_.max_hor_acc_limit * hf);
     acc_clamped.z() = std::clamp(
         acc.z(),
-        config_.max_up_acc * heavy_drone_factor,
-        config_.max_down_acc * heavy_drone_factor);
+        config_.max_up_acc * hf,
+        config_.max_down_acc * hf);
 
     return acc_clamped;
   }

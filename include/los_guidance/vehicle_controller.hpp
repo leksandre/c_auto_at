@@ -81,6 +81,9 @@ namespace los_guidance
     bool enable_velocity_control{false};    //< Включить контроль скорости
     bool enable_acceleration_control{true}; //< Включить контроль ускорения (по умолчанию)
 
+    // === Масштабирование для тяжёлого дрона ===
+    double heavy_drone_factor{1.0}; ///< Множитель ограничений ускорения (0.62 для 2519г)
+
     // === Отладка ===
     bool debug_logging{false}; ///< Включить отладочное логирование
   };

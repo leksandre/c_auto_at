@@ -231,8 +231,18 @@ Eigen::Vector3d TargetTracker::computeLosLambda_(
 ) {
   // lambda = u_n × u_dot_n (cross product)
   Eigen::Vector3d u_dot = (los_current - los_prev) / dt;
-  Eigen::Vector3d lambda = los_current.cross(u_dot);
-  return lambda;
+  Eigen::Vector3d lambda_raw = los_current.cross(u_dot);
+  
+  // Экспоненциальное сглаживание lambda для подавления шума дифференцирования
+  if (!lambda_initialized_) {
+    lambda_smooth_ = lambda_raw;
+    lambda_initialized_ = true;
+  } else {
+    double alpha = 0.3; // Коэффициент сглаживания (0.0-1.0, меньше = плавнее)
+    lambda_smooth_ = alpha * lambda_raw + (1.0 - alpha) * lambda_smooth_;
+  }
+  
+  return lambda_smooth_;
 }
 
 double TargetTracker::smooth_(double prev, double current, double alpha) {
@@ -264,8 +274,7 @@ Eigen::Vector3d TargetTracker::getLosVector() const {
 
 Eigen::Vector3d TargetTracker::getLosAngularVelocity() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  // Можно хранить последнее вычисленное lambda
-  return Eigen::Vector3d::Zero();  // TODO: store last lambda
+  return lambda_smooth_;
 }
 
 bool TargetTracker::isValid() const {
@@ -277,10 +286,12 @@ void TargetTracker::reset() {
   std::lock_guard<std::mutex> lock(mutex_);
   pixel_initialized_ = false;
   los_initialized_ = false;
+  lambda_initialized_ = false;
   pixel_u_prev_ = 0.0;
   pixel_v_prev_ = 0.0;
   los_nav_prev_.setZero();
   los_nav_history_.setZero();
+  lambda_smooth_.setZero();
   last_timestamp_us_ = 0;
 }
 

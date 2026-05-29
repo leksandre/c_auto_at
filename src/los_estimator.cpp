@@ -305,9 +305,20 @@ void LosEstimator::adaptNoise_(const Eigen::VectorXd& residual) {
   // Уменьшаем R (больше доверия к измерению при большом остатке)
   R_ /= scale;
   
-  // Ограничение Q и R для стабильности
-  Q_ = Q_.cwiseMax(EPSILON * Eigen::MatrixXd::Identity(STATE_DIM, STATE_DIM));
-  R_ = R_.cwiseMax(EPSILON * Eigen::MatrixXd::Identity(MEASUREMENT_DIM, MEASUREMENT_DIM));
+  // 🛠 FIX: Двустороннее ограничение Q и R для предотвращения неограниченного роста/сжатия
+  // Верхняя граница: 100x от начального значения
+  // Нижняя граница: EPSILON (сохранение положительной определённости)
+  static const double Q_INIT = config_.process_noise_Q;
+  static const double R_INIT = config_.measurement_noise_R;
+  static const double MAX_Q_SCALE = 100.0;
+  static const double MAX_R_SCALE = 100.0;
+  static const double MIN_Q_SCALE = 1.0 / MAX_Q_SCALE;
+  static const double MIN_R_SCALE = 1.0 / MAX_R_SCALE;
+  
+  Q_ = Q_.cwiseMax(Q_INIT * MIN_Q_SCALE * Eigen::MatrixXd::Identity(STATE_DIM, STATE_DIM))
+         .cwiseMin(Q_INIT * MAX_Q_SCALE * Eigen::MatrixXd::Identity(STATE_DIM, STATE_DIM));
+  R_ = R_.cwiseMax(R_INIT * MIN_R_SCALE * Eigen::MatrixXd::Identity(MEASUREMENT_DIM, MEASUREMENT_DIM))
+         .cwiseMin(R_INIT * MAX_R_SCALE * Eigen::MatrixXd::Identity(MEASUREMENT_DIM, MEASUREMENT_DIM));
 }
 
 Eigen::Matrix3d LosEstimator::skewSymmetric_(const Eigen::Vector3d& v) {

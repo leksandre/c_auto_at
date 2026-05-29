@@ -68,7 +68,6 @@ namespace los_guidance
     double max_up_acc{-5.0};
     double max_down_acc{5.0};
     double max_hor_acc{12.0};
-    double max_vert_acc{12.0};
 
     // === Скорость ===
     double min_vc{1.0};
@@ -96,7 +95,6 @@ namespace los_guidance
     double mass_new_g{2519.0}; // Новая масса (граммы)
     double mass_ratio{1.61};   // = mass_new / mass_old
     double accel_scale{0.62};  // = 1/mass_ratio // ПОКА ПРИМЕНЯЕМ ДЛЯ ЗЭТ ВЕЛИЧИНЫ ТОЛЬКО
-    double pid_scale{0.79};    // = sqrt(1/mass_ratio)
 
     // 🆕 Компенсация ЦТ
     double cg_trim_pitch_deg{2.5};
@@ -214,13 +212,15 @@ namespace los_guidance
      * @param lambda Угловая скорость LOS (nav frame)
      * @param pitch_rad Тангаж дрона (rad) для оценки Vc
      * @param yaw_rad Рыскание дрона (rad) для трансформации
+     * @param roll_rad Крен дрона (rad) для полной трансформации body→nav
      * @return GuidanceOutput с командой ускорения
      */
     GuidanceOutput computeAcceleration(
         const Eigen::Vector3d &u_los,
         const Eigen::Vector3d &lambda,
         double pitch_rad,
-        double yaw_rad);
+        double yaw_rad,
+        double roll_rad = 0.0);
 
     /**
      * @brief Расчёт команд ускорения (альтернативный метод с Vc)
@@ -228,13 +228,15 @@ namespace los_guidance
      * @param lambda Угловая скорость LOS
      * @param Vc Оценка скорости (m/s)
      * @param yaw_rad Рыскание дрона (rad)
+     * @param roll_rad Крен дрона (rad) для полной трансформации body→nav
      * @return GuidanceOutput с командой ускорения
      */
     GuidanceOutput computeAccelerationWithVc(
         const Eigen::Vector3d &u_los,
         const Eigen::Vector3d &lambda,
         double Vc,
-        double yaw_rad);
+        double yaw_rad,
+        double roll_rad = 0.0);
 
     /**
      * @brief Оценка скорости на основе тангажа
@@ -292,7 +294,31 @@ namespace los_guidance
      */
     void setParallelAccEnabled(bool enable);
 
+    /**
+     * @brief Установка GPS скорости для fallback оценки Vc
+     * @param velocity_mps Скорость дрона (м/с)
+     */
+    void setGpsVelocity(double velocity_mps) { gps_velocity_ = velocity_mps; }
+
   private:
+    /**
+     * @brief Внутренняя реализация расчёта ускорения (общая для обоих публичных методов)
+     * @param u_los Нормированный LOS вектор (nav frame)
+     * @param lambda Угловая скорость LOS (nav frame)
+     * @param Vc Скорость сближения (m/s)
+     * @param roll_rad Крен (rad)
+     * @param pitch_rad Тангаж (rad)
+     * @param yaw_rad Рыскание (rad)
+     * @return GuidanceOutput с командой ускорения
+     */
+    GuidanceOutput computeAccelerationImpl_(
+        const Eigen::Vector3d &u_los,
+        const Eigen::Vector3d &lambda,
+        double Vc,
+        double roll_rad,
+        double pitch_rad,
+        double yaw_rad);
+
     GuidanceConfig config_;
     double dt_;
     mutable std::mutex mutex_; // Защита состояния
@@ -326,6 +352,9 @@ namespace los_guidance
     // === Последняя команда ===
     Eigen::Vector3d last_acc_cmd_{Eigen::Vector3d::Zero()};
     Eigen::Vector3d acc_frd_sp_{Eigen::Vector3d::Zero()};
+
+    // === GPS скорость для fallback Vc ===
+    double gps_velocity_{0.0};
 
     // === Отладка ===
     GuidanceDebug debug_info_;
@@ -376,10 +405,17 @@ namespace los_guidance
         double dt);
 
     /**
-     * @brief Трансформация ускорения из body в nav frame
+     * @brief Трансформация ускорения из body (FRD) в nav (NED) frame
+     * @param acc_frd Ускорение в FRD (body) frame
+     * @param roll_rad Крен (rad)
+     * @param pitch_rad Тангаж (rad)
+     * @param yaw_rad Рыскание (rad)
+     * @return Ускорение в NED (nav) frame
      */
     Eigen::Vector3d transformAccToNav_(
         const Eigen::Vector3d &acc_frd,
+        double roll_rad,
+        double pitch_rad,
         double yaw_rad);
 
     /**

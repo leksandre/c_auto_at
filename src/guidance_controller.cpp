@@ -42,25 +42,62 @@ namespace los_guidance
       const Eigen::Vector3d &u_los,
       const Eigen::Vector3d &lambda,
       double pitch_rad,
-      double yaw_rad)
+      double yaw_rad,
+      double roll_rad)
   {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    GuidanceOutput output;
 
     // Проверка валидности входных данных
     if (u_los.norm() < EPSILON)
     {
+      GuidanceOutput output;
       output.is_valid = false;
       return output;
     }
 
-    // При старте атаки устанавливаем фиксированную начальную скорость 0.3 м/с
-    // чтобы инициировать движение сразу, даже если дрон завис или на земле.
-    // После первого цикла используется оценка на основе тангажа.
-  //    double Vc = estimateVcFromPitch(pitch_rad, config_.max_lat_acc / CONSTANTS_ONE_G);
-  
-    double Vc = 0.3; // здесь константа   
+    // Оценка скорости сближения (Vc) на основе тангажа
+    double Vc = estimateVcFromPitch(pitch_rad, config_.max_lat_acc / CONSTANTS_ONE_G);
+    
+    // Fallback: если оценка по тангажу слишком мала или невалидна — используем GPS скорость
+    if (Vc < config_.min_vc || std::isnan(Vc))
+    {
+      Vc = gps_velocity_;
+    }
+    
+    // Ограничение Vc в допустимых пределах
+    Vc = std::clamp(Vc, config_.min_vc, config_.max_vc);
+
+    return computeAccelerationImpl_(u_los, lambda, Vc, roll_rad, pitch_rad, yaw_rad);
+  }
+
+  GuidanceOutput GuidanceController::computeAccelerationWithVc(
+      const Eigen::Vector3d &u_los,
+      const Eigen::Vector3d &lambda,
+      double Vc,
+      double yaw_rad,
+      double roll_rad)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (u_los.norm() < EPSILON)
+    {
+      GuidanceOutput output;
+      output.is_valid = false;
+      return output;
+    }
+
+    return computeAccelerationImpl_(u_los, lambda, Vc, roll_rad, 0.0, yaw_rad);
+  }
+
+  GuidanceOutput GuidanceController::computeAccelerationImpl_(
+      const Eigen::Vector3d &u_los,
+      const Eigen::Vector3d &lambda,
+      double Vc,
+      double roll_rad,
+      double pitch_rad,
+      double yaw_rad)
+  {
+    GuidanceOutput output;
     output.Vc_estimate = Vc;
 
     // Выбор алгоритма наведения
@@ -89,64 +126,14 @@ namespace los_guidance
     }
 
     // Ограничение ускорений
-    acc_cmd = clampAcceleration_(acc_cmd); // будем ограничивать только по зэту
+    acc_cmd = clampAcceleration_(acc_cmd);
 
-    // Трансформация в навигационную систему
-    output.acceleration_cmd = transformAccToNav_(acc_cmd, yaw_rad);
+    // Трансформация в навигационную систему (полная: roll + pitch + yaw)
+    output.acceleration_cmd = transformAccToNav_(acc_cmd, roll_rad, pitch_rad, yaw_rad);
     output.acceleration_frd = acc_cmd;
     output.is_valid = true;
 
     // Сохранение для последующего использования
-    last_acc_cmd_ = output.acceleration_cmd;
-
-    return output;
-  }
-
-  GuidanceOutput GuidanceController::computeAccelerationWithVc(
-      const Eigen::Vector3d &u_los,
-      const Eigen::Vector3d &lambda,
-      double Vc,
-      double yaw_rad)
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    GuidanceOutput output;
-
-    if (u_los.norm() < EPSILON)
-    {
-      output.is_valid = false;
-      return output;
-    }
-
-    output.Vc_estimate = Vc;
-
-    Eigen::Vector3d acc_cmd;
-    if (config_.enable_PI_control)
-    {
-      if (config_.top_attack_mode)
-      {
-        acc_cmd = computeInterceptPI_(u_los, dt_);
-      }
-      else
-      {
-        acc_cmd = computePnPI_(u_los, lambda, Vc, dt_);
-      }
-    }
-    else
-    {
-      acc_cmd = config_.pn_gain_N * Vc * lambda.cross(u_los);
-    }
-
-    if (config_.enable_acc_parallel)
-    {
-      acc_cmd = addParallelAcceleration_(acc_cmd, u_los, Vc, dt_);
-    }
-
-    acc_cmd = clampAcceleration_(acc_cmd);
-    output.acceleration_cmd = transformAccToNav_(acc_cmd, yaw_rad);
-    output.acceleration_frd = acc_cmd;
-    output.is_valid = true;
-
     last_acc_cmd_ = output.acceleration_cmd;
 
     return output;
@@ -497,31 +484,15 @@ namespace los_guidance
   {
     Eigen::Vector3d acc_clamped;
 
-    // Логирование значений масштабирования
-    // RCLCPP_INFO(rclcpp::get_logger("guidance_controller"), "Clamp modifications - x: %.3f, y: %.3f, z: %.3f", 
-    //             config_.clamp_modifications_scale_x, 
-    //             config_.clamp_modifications_scale_y, 
-    //             config_.clamp_modifications_scale_z);
-
     // 🆕 Динамическое ограничение с учётом массы
     double mass_factor = config_.accel_scale; // = 0.62 для 2519г
 
-    acc_clamped.x() = clamp_(acc.x() * config_.clamp_modifications_scale_x, 2.0 , 9.9);
-    // acc_clamped.x() = clamp_(
-    //     acc.x()
-    //     ,
-    //     -config_.max_hor_acc * mass_factor,
-    //     config_.max_hor_acc * mass_factor
-    //   );
-
-    acc_clamped.y() = clamp_(acc.y() * config_.clamp_modifications_scale_y, 0.01, 9.9);
-    // acc_clamped.y() = clamp_(
-    //     acc.y()
-    //     ,
-    //     -config_.max_hor_acc * mass_factor,
-    //     config_.max_hor_acc * mass_factor
-    //   );
+    // Симметричные пределы для X и Y (можно двигаться в обе стороны)
+    double hor_limit = config_.max_hor_acc * mass_factor;
+    acc_clamped.x() = clamp_(acc.x() * config_.clamp_modifications_scale_x, -hor_limit, hor_limit);
+    acc_clamped.y() = clamp_(acc.y() * config_.clamp_modifications_scale_y, -hor_limit, hor_limit);
     
+    // Z: вертикальные пределы (NED: up = negative, down = positive)
     acc_clamped.z() = clamp_(
         acc.z() * config_.clamp_modifications_scale_z,
         config_.max_up_acc * mass_factor,
@@ -550,13 +521,21 @@ namespace los_guidance
 
   Eigen::Vector3d GuidanceController::transformAccToNav_(
       const Eigen::Vector3d &acc_frd,
+      double roll_rad,
+      double pitch_rad,
       double yaw_rad)
   {
-    // Трансформация из body (FRD) в nav frame через yaw
-    Eigen::Vector3d euler_local{0.0, 0.0, yaw_rad};
-    Eigen::Quaterniond q_local = Eigen::AngleAxisd(euler_local.z(), Eigen::Vector3d::UnitZ()) *
-                                 Eigen::AngleAxisd(euler_local.y(), Eigen::Vector3d::UnitY()) *
-                                 Eigen::AngleAxisd(euler_local.x(), Eigen::Vector3d::UnitX());
+    // Полная трансформация из body (FRD) в nav (NED) frame
+    // Используем полную матрицу вращения: R = Rz(yaw) * Ry(pitch) * Rx(roll)
+    // В FRD: X-вперёд, Y-вправо, Z-вниз
+    // В NED: X-север, Y-восток, Z-вниз
+    // Трансформация: acc_nav = R * acc_body (где R — rotation body→nav)
+    
+    Eigen::Quaterniond q_local =
+        Eigen::AngleAxisd(yaw_rad,   Eigen::Vector3d::UnitZ()) *
+        Eigen::AngleAxisd(pitch_rad, Eigen::Vector3d::UnitY()) *
+        Eigen::AngleAxisd(roll_rad,  Eigen::Vector3d::UnitX());
+    
     Eigen::Affine3d transformation(q_local);
     return transformation * acc_frd;
   }

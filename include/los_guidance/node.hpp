@@ -96,6 +96,11 @@ namespace los_guidance
     bool use_gyro_comp{false};
     bool debug{false};
 
+    // Фильтрация трекера
+    double pixel_smooth_alpha{0.7};
+    double los_smooth_alpha{0.3};
+    double min_confidence{0.6};
+
     // Логирование
     int log_throttle_interval_ms{12000};
 
@@ -105,7 +110,6 @@ namespace los_guidance
     double max_lat_acc{3.0};
     double max_up_acc{-5.0};
     double max_down_acc{5.0};
-    double max_vert_acc_limit{12.0};
     double max_hor_acc_limit{12.0};
 
     // Скорость
@@ -124,7 +128,7 @@ namespace los_guidance
     double max_acc_parallel{2.0};
 
     // PI LOS параметры (Y axis)
-    double los_y_ff_enable{false};
+    bool los_y_ff_enable{false};
     double los_y_ff{7.0};
     double los_y_ff_limit{3.0};
     double los_y_err_ff_limit{0.1};
@@ -133,7 +137,7 @@ namespace los_guidance
     double los_y_int_limit{3.0};
 
     // PI LOS параметры (Z axis)
-    double los_z_ff_enable{false};
+    bool los_z_ff_enable{false};
     double los_z_ff{7.0};
     double los_z_ff_limit{3.0};
     double los_z_err_ff_limit{0.1};
@@ -289,6 +293,26 @@ namespace los_guidance
      * @param msg Сообщение Detection2D
      */
     void trackBBox2DCallback(vision_msgs::msg::Detection2D::SharedPtr msg);
+
+    /**
+     * @brief Общая обработка данных трекера (KF + guidance + lock-free store)
+     * Вызывается из trackerResultCallback и trackBBox2DCallback после получения TargetInfo
+     * @param target Информация о цели от трекера
+     * @param timestamp_us Временная метка в микросекундах
+     * @param omega_b Угловая скорость (gyro) для KF predict
+     * @param R_nb Матрица вращения nav→body для KF predict
+     * @param roll Текущий крен (rad) для computeAcceleration
+     * @param pitch Текущий тангаж (rad) для computeAcceleration
+     * @param yaw Текущий рыскание (rad) для computeAcceleration
+     */
+    void processTargetData_(
+        const TargetInfo &target,
+        uint64_t timestamp_us,
+        const Eigen::Vector3d &omega_b,
+        const Eigen::Matrix3d &R_nb,
+        double roll,
+        double pitch,
+        double yaw);
 
     /**
      * @brief Обработка статуса дрона PX4
@@ -501,29 +525,25 @@ bool update_acc_setpoint_{false};
     ActiveCommand active_command_ = ActiveCommand::NONE;
     double active_command_param_{0.0};  // Параметр активной команды
 
-    struct
-    {
-      double lat, lon, alt;
-    } target_gps_ = {0, 0, 0};
-
-    std::string closest_target_ip_;
-
-    struct
-    {
-      double lat, lon, alt;
-    } ref_gps_ = {0, 0, 0};
-    bool ref_gps_valid_ = false;
-    Eigen::Vector3d target_ned_ = Eigen::Vector3d::Zero();
-
-    static Eigen::Vector3d gpsToNed(double lat, double lon, double alt,
-                                    double ref_lat, double ref_lon, double ref_alt);
-
     struct GpsState
     {
       double lat, lon, alt;
       uint64_t timestamp_us;
       bool is_valid;
-    } drone_gps_;
+    };
+
+    GpsState target_gps_{0, 0, 0, 0, false};
+
+    std::string closest_target_ip_;
+
+    GpsState ref_gps_{0, 0, 0, 0, false};
+    bool ref_gps_valid_ = false;
+    Eigen::Vector3d target_ned_ = Eigen::Vector3d::Zero();
+
+    GpsState drone_gps_;
+
+    static Eigen::Vector3d gpsToNed(double lat, double lon, double alt,
+                                    double ref_lat, double ref_lon, double ref_alt);
 
     std::unique_ptr<Commander> commander_;
     bool commander_enabled_{false};
@@ -548,6 +568,22 @@ bool update_acc_setpoint_{false};
     rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr gps_pos_sub_;
     void vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
 
+    rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr local_pos_sub_;
+    void vehicleLocalPositionCallback(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg);
+
+    // 🆕 Хелпер: синхронизация attitude/gyro + конвертация quaternion → euler
+    bool syncAndGetOrientation_(
+        uint64_t ref_us,
+        Eigen::Quaterniond& quat,
+        Eigen::Vector3d& omega_b,
+        double& roll,
+        double& pitch,
+        double& yaw,
+        Eigen::Matrix3d& R_nb);
+
+    // 🆕 Хелпер: публикация setpoint атаки (OFFBOARD + acc_cmd)
+    void executeAttackSetpoint_(const Eigen::Vector3d& acc_cmd);
+
     void executeAutoModeSequence();
 void executeSearchMode();                          // 🆕
     static double haversineDist(double lat1, double lon1, double lat2, double lon2);
@@ -556,13 +592,6 @@ void executeSearchMode();                          // 🆕
     // 🆕 Обработка прерывания взлёта
     void handleTakeoffAbort();
   };
-
-  // === Математика расстояний (Haversine) ===
-
-  static double haversineDist(double lat1, double lon1, double lat2, double lon2);
-   bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
-  void executeAutoModeSequence();
-void executeSearchMode();                          // 🆕
 
 } // namespace los_guidance
 
