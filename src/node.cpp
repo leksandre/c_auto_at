@@ -12,6 +12,9 @@
 #include <Eigen/Geometry>
 #include <cmath>
 #include <limits>
+#include <poll.h>
+#include <fcntl.h>
+#include <cerrno>
 
 namespace los_guidance
 {
@@ -1933,6 +1936,9 @@ namespace los_guidance
             attack_enabled_ = true;
             local_start_attack = true;
             local_attack_enabled = true;
+            // 🆕 Запускаем таймер для fallback при потере цели
+            visual_attack_entry_time_ = std::chrono::steady_clock::now();
+            visual_attack_timer_active_ = true;
           }
         RCLCPP_INFO(this->get_logger(), "🎯 VISUAL ATTACK ENGAGED (dist=%.1fm < 200m)", current_dist);
       }
@@ -2062,22 +2068,95 @@ namespace los_guidance
     {
       if (!attack_ready_.load(std::memory_order_acquire))
       {
-        // 🔄 Цель потеряна — возвращаемся к подлёту по GPS (не останавливаемся!)
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                             "⚠️ Target lost! Returning to GPS_APPROACH (target_gps_ preserved)");
+        // 🆕 Проверка таймера: ждём 2 секунды перед fallback
+        // Это предотвращает осцилляции при кратковременной потере цели
+        bool should_fallback = false;
         {
           std::lock_guard<std::mutex> lock(state_mutex_);
-          auto_phase_ = AutoPhase::GPS_APPROACH;
-          start_attack_ = false;
-          attack_enabled_ = false;
+          if (visual_attack_timer_active_)
+          {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - visual_attack_entry_time_).count();
+            if (elapsed >= 2)
+            {
+              should_fallback = true;
+              visual_attack_timer_active_ = false;
+            }
+          }
+          else
+          {
+            // Таймер не активен — fallback сразу (для повторных потерь)
+            should_fallback = true;
+          }
         }
-        current_phase = AutoPhase::GPS_APPROACH;
-        local_start_attack = false;
-        local_attack_enabled = false;
-        // ❗ Не делаем return — проваливаемся в логику GPS_APPROACH ниже
+
+        if (should_fallback)
+        {
+          // 🔄 Цель потеряна > 2с — возвращаемся к подлёту по GPS
+          RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                               "⚠️ Target lost for >2s! Returning to GPS_APPROACH (target_gps_ preserved)");
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            auto_phase_ = AutoPhase::GPS_APPROACH;
+            start_attack_ = false;
+            attack_enabled_ = false;
+            // 🆕 Обновляем ref_gps_ на текущую позицию дрона
+            // Чтобы NED-проекция target_gps_ была точной после длительного VISUAL_ATTACK
+            ref_gps_ = drone_gps_;
+            ref_gps_valid_ = true;
+          }
+          current_phase = AutoPhase::GPS_APPROACH;
+          local_start_attack = false;
+          local_attack_enabled = false;
+          local_update_acc_setpoint = false; // 🆕 Предотвращаем setManualMode() в ФАЗЕ 3
+
+          // 🆕 Публикуем GPS setpoint прямо здесь, чтобы OFFBOARD не прерывался
+          // Следующий тик (через 10ms) подхватит GPS_APPROACH и обновит NED
+          vehicle_ctrl_->publishOffboardControlMode();
+          vehicle_ctrl_->publishPositionSetpoint(local_target_ned,
+                                                 Eigen::Vector3d{7.0, 0.0, 0.0},
+                                                 Eigen::Vector3d{2.5, 0.0, 0.0});
+          return; // 🆕 Выходим — следующий тик подхватит GPS_APPROACH нормально
+        }
+        else
+        {
+          // Цель потеряна < 2с — ждём, продолжаем публиковать setpoint
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                               "⏳ Target lost, waiting %dms before fallback...",
+                               static_cast<int>(2000 - std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - visual_attack_entry_time_).count()));
+          // Продолжаем публиковать последний setpoint чтобы не упасть
+          Eigen::Vector3d acc_cmd = guidance_ctrl_->getLastAccelerationCommand();
+          executeAttackSetpoint_(acc_cmd);
+          return;
+        }
       }
       else
       {
+        // 🆕 Цель видима — сбрасываем таймер (продлеваем VISUAL_ATTACK)
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          visual_attack_entry_time_ = std::chrono::steady_clock::now();
+          visual_attack_timer_active_ = true;
+        }
+
+        // 🆕 Опрашиваем target_gps_ каждые ~2.5с во время VISUAL_ATTACK
+        // Чтобы при fallback координаты цели были свежими (не stale)
+        {
+          static int visual_poll_counter = 0;
+          if (++visual_poll_counter >= 250 && !local_closest_ip.empty())
+          {
+            visual_poll_counter = 0;
+            double t_lat, t_lon, t_alt;
+            int t_sats;
+            if (queryTargetGPS(local_closest_ip, target_query_port_, t_lat, t_lon, t_alt, t_sats))
+            {
+              std::lock_guard<std::mutex> lock(state_mutex_);
+              target_gps_ = {t_lat, t_lon, t_alt, 0, true};
+              local_target_gps = {t_lat, t_lon, t_alt, 0, true};
+            }
+          }
+        }
 
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1500,
                              "🔍 TIMER: phase=%d, ready=%d, should_attack=%d",
@@ -2499,10 +2578,15 @@ namespace los_guidance
     return R * 2 * std::atan2(std::sqrt(a), std::sqrt(1 - a));
   }
 
-  // === TCP-клиент для опроса целей ===
+  // === TCP-клиент для опроса целей (non-blocking + poll 10ms) ===
+  // 🆕 Non-blocking socket + poll() с таймаутом 10ms
+  //   Максимальная блокировка: 10ms = 1 цикл управления (вместо 500ms = 50 циклов)
+  //   При недоступности цели — возвращаем false, повторим в следующем опросе
   bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats)
   {
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    const int POLL_TIMEOUT_MS = 10; // 🆕 10ms вместо 500ms
+
+    int sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (sock < 0)
     {
       RCLCPP_INFO(this->get_logger(), "🚫 Failed to create socket for GPS query to %s:%d", ip.c_str(), port);
@@ -2510,9 +2594,7 @@ namespace los_guidance
     }
 
     // ✅ Правильная инициализация структуры
-    struct sockaddr_in addr
-    {
-    };
+    struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0)
@@ -2522,21 +2604,37 @@ namespace los_guidance
       return false;
     }
 
-    // ✅ Увеличил таймаут до 500 мс (200 мс мало для сети)
-    struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec = 500000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+    // 🆕 Non-blocking connect — всегда возвращает -1 с EINPROGRESS
+    int rc = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS)
     {
-      RCLCPP_INFO(this->get_logger(), "🚫 Failed to connect to target for GPS query: %s:%d", ip.c_str(), port);
+      // Реальная ошибка (не EINPROGRESS)
       close(sock);
       return false;
     }
 
-    // ✅ Отправка с проверкой
+    // 🆕 Ждём завершения connect через poll() с таймаутом 10ms
+    struct pollfd pfd;
+    pfd.fd = sock;
+    pfd.events = POLLOUT;
+    int poll_ret = poll(&pfd, 1, POLL_TIMEOUT_MS);
+    if (poll_ret <= 0)
+    {
+      // Таймаут или ошибка — соединение не установлено за 10ms
+      close(sock);
+      return false;
+    }
+
+    // Проверяем ошибки на сокете после connect
+    int so_error = 0;
+    socklen_t len = sizeof(so_error);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0 || so_error != 0)
+    {
+      close(sock);
+      return false;
+    }
+
+    // 🆕 Non-blocking send
     std::string req = "{\"showgps\": true}\n";
     ssize_t sent = send(sock, req.c_str(), req.size(), 0);
     if (sent < 0 || sent != static_cast<ssize_t>(req.size()))
@@ -2545,13 +2643,21 @@ namespace los_guidance
       return false;
     }
 
-    // ✅ Чтение ответа
+    // 🆕 Non-blocking recv через poll() с таймаутом 10ms
+    pfd.events = POLLIN;
+    poll_ret = poll(&pfd, 1, POLL_TIMEOUT_MS);
+    if (poll_ret <= 0)
+    {
+      // Таймаут — ответ не пришёл за 10ms
+      close(sock);
+      return false;
+    }
+
     char buf[512] = {0};
     int n = recv(sock, buf, sizeof(buf) - 1, 0);
     close(sock);
     if (n <= 0)
     {
-      RCLCPP_INFO(this->get_logger(), "🚫 No response received from target during GPS query: %s:%d", ip.c_str(), port);
       return false;
     }
     buf[n] = '\0';
@@ -2582,7 +2688,6 @@ namespace los_guidance
     std::string data(buf);
     if (data.find("\"status\"") == std::string::npos || data.find("success") == std::string::npos)
     {
-      RCLCPP_INFO(this->get_logger(), "🚫 Target responded with failure status during GPS query: %s:%d", ip.c_str(), port);
       return false;
     }
 
@@ -2593,106 +2698,8 @@ namespace los_guidance
 
     // ✅ Валидация: sats опционален, проверяем только координаты
     bool has_valid_coords = (std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3);
-    if (!has_valid_coords)
-    {
-      RCLCPP_INFO(this->get_logger(), "🚫 Target returned invalid GPS coordinates: lat=%.6f, lon=%.6f, alt=%.2f, sats=%d",
-                  out_lat, out_lon, out_alt, out_sats);
-    }
     return has_valid_coords;
   }
-
-  // // === TCP-клиент для опроса целей ===
-  // bool Node::queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats)
-  // {
-  //   int sock = socket(AF_INET, SOCK_STREAM, 0);
-  //   if (sock < 0)
-  //     return false;
-
-  //   struct sockaddr_in addr
-  //   {
-  //   };
-  //   addr.sin_family = AF_INET;
-  //   addr.sin_port = htons(port);
-  //   if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0)
-  //   {
-  //     close(sock);
-  //     return false;
-  //   }
-
-  //   struct timeval tv;
-  //   tv.tv_sec = 0;
-  //   tv.tv_usec = 200000; // 200 мс вместо 2 с
-  //   setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-  //   setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-  //   if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
-  //   {
-  //     close(sock);
-  //     return false;
-  //   }
-
-  //   std::string req = "{\"showgps\": true}\n";
-  //   send(sock, req.c_str(), req.size(), 0);
-  //   char buf[512] = {0};
-  //   int n = recv(sock, buf, sizeof(buf) - 1, 0);
-  //   close(sock);
-  //   if (n <= 0)
-  //     return false;
-  //   buf[n] = '\0';
-
-  //   // Лёгкий парсер без зависимостей
-  //   auto findVal = [&](const char *key) -> double
-  //   {
-  //     std::string s(buf);
-  //     size_t pos = s.find(key);
-  //     if (pos == std::string::npos)
-  //       return 0.0;
-  //     pos = s.find(':', pos);
-  //     if (pos == std::string::npos)
-  //       return 0.0;
-  //     try
-  //     {
-  //       return std::stod(s.c_str() + pos + 1);
-  //     }
-  //     // catch (...)
-  //     // {
-  //     //   return 0.0;
-  //     // }
-  //     catch (const std::exception &e)
-  //     {
-  //       // RCLCPP_WARN(logger_, "⚠️ Parse error for key '%s': %s", key, e.what());
-  //       std::cerr << "[WARN] Parse error for key in json " << key << "  !!errors\n";
-  //       return 0.0;
-  //     }
-  //   };
-
-  //   // if (std::string(buf).find("\"status\":\"success\"") == std::string::npos)
-  //   //   return false;
-
-  //   std::string data(buf);
-  //   if (data.find("\"status\"") == std::string::npos || data.find("success") == std::string::npos)
-  //   {
-  //     return false;
-  //   }
-
-  //   out_lat = findVal("\"lat\"");
-  //   out_lon = findVal("\"lon\"");
-  //   out_alt = findVal("\"alt\"");
-  //   out_sats = (int)findVal("\"sats\"");
-
-  //   //v1 with sats
-  //   //return (out_sats > 0 && std::abs(out_lat) > 1e-3);
-
-  //   //v2
-  //   // std::string response(buf);
-  //   // bool has_sats = response.find("\"sats\"") != std::string::npos;
-  //   // if (has_sats && out_sats <= 0) return false;
-  //   // return std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3;
-
-  //   //v3
-  //   bool has_valid_coords = (std::abs(out_lat) > 1e-3 && std::abs(out_lon) > 1e-3);
-  //   return has_valid_coords;
-  // }
 
   // === Основная авто-последовательность ===
 
