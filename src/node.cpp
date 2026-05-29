@@ -720,6 +720,18 @@ namespace los_guidance
                     static_cast<int>(auto_phase_));
             }
 
+            // === 0. Гарантируем OFFBOARD режим для TrajectorySetpoint ===
+            if (vehicle_ctrl_->getCurrentMode() != FlightMode::OFFBOARD)
+            {
+                RCLCPP_INFO(this->get_logger(), "📡 Manual control: switching to OFFBOARD mode...");
+                for (int i = 0; i < 10; i++)
+                {
+                    vehicle_ctrl_->setOffboardMode();
+                    vehicle_ctrl_->publishOffboardControlMode();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+            }
+
             // === 1. Применение фильтрации и ограничений к ручному управлению ===
             //const auto& cfg = guidance_config_;
             
@@ -874,7 +886,43 @@ namespace los_guidance
                 //     manual_input_.yaw.load(), manual_input_.throttle.load(),
                 //     static_cast<int>(auto_phase_));
                     
-            // === 4. Публикация (только если не в авто-режиме) ===
+            // === 4. Авто-переключение в STABILIZED при опасных условиях ===
+            // 4a. Если все стики в нейтрали (roll≈0, pitch≈0, yaw≈0, throttle≈0.5)
+            //     переключаемся в STABILIZED — RC стики работают напрямую через PX4
+            // 4b. Если газ критически низкий (< 10%) — дрон может упасть,
+            //     переключаемся в STABILIZED чтобы PX4 взял управление на себя
+            const float STICK_DEADZONE = 0.05f;
+            const float THROTTLE_CENTER_TOLERANCE = 0.05f;
+            const float THROTTLE_CRITICAL_LOW = 0.10f; // 10% — опасно низкий газ
+            bool sticks_neutral = (std::abs(roll) < STICK_DEADZONE &&
+                                   std::abs(pitch) < STICK_DEADZONE &&
+                                   std::abs(yaw) < STICK_DEADZONE &&
+                                   std::abs(throttle - 0.5f) < THROTTLE_CENTER_TOLERANCE);
+            bool throttle_critical = (throttle < THROTTLE_CRITICAL_LOW);
+            if (vehicle_ctrl_->getCurrentMode() == FlightMode::OFFBOARD &&
+                (sticks_neutral || throttle_critical))
+            {
+                if (throttle_critical) {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                        "🛑 Throttle critically low (%.2f) → switching to STABILIZED mode", throttle);
+                } else {
+                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                        "🔄 Sticks neutral → switching to STABILIZED mode");
+                }
+                vehicle_ctrl_->setStabilizedMode();
+                // Публикуем OffboardControlMode с acceleration=false для выхода из watchdog
+                px4_msgs::msg::OffboardControlMode offboard_msg;
+                offboard_msg.position = false;
+                offboard_msg.velocity = false;
+                offboard_msg.acceleration = false;
+                offboard_msg.attitude = false;
+                offboard_msg.body_rate = false;
+                offboard_msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+                // Не публикуем TrajectorySetpoint — в STABILIZED он не нужен
+                return;
+            }
+
+            // === 5. Публикация (только если не в авто-режиме) ===
             // if (auto_phase_ == AutoPhase::IDLE && active_command_ == ActiveCommand::NONE) {}
             
 

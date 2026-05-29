@@ -225,6 +225,12 @@ namespace los_guidance
     bool setPositionControlMode();
 
     /**
+     * @brief Установка режима Stabilized
+     * @return true если команда успешно отправлена
+     */
+    bool setStabilizedMode();
+
+    /**
      * @brief Публикация команды ускорения
      * @param acc_setpoint Команда ускорения (nav frame, m/s²)
      * @return true если команда успешно опубликована

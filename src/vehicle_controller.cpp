@@ -204,6 +204,28 @@ namespace los_guidance
     return success;
   }
 
+  bool VehicleController::setStabilizedMode()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (status_.flight_mode == FlightMode::STABILIZED)
+    {
+      return true;
+    }
+
+    bool success = publishVehicleCommand_(
+        VEHICLE_CMD_DO_SET_MODE,
+        1.0,
+        static_cast<float>(PX4_CUSTOM_MAIN_MODE_STABILIZED));
+
+    if (success && config_.debug_logging)
+    {
+      RCLCPP_INFO(node_->get_logger(), "STABILIZED mode command sent");
+    }
+
+    return success;
+  }
+
   bool VehicleController::publishAccelerationSetpoint(
       const Eigen::Vector3d &acc_setpoint)
   {
