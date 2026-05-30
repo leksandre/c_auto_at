@@ -16,15 +16,27 @@ namespace los_guidance
     ArmCallback arm_cb, LandCallback land_cb, SearchRoundCallback search_round_cb,
     AltitudeCallback up_cb, AltitudeCallback down_cb,
     PatrolRoundCallback patrol_cb, HoldSquareCallback hold_cb,
-    SearchModeCallback search_mode_cb, ManualControlCallback manual_cb)  // ← Добавлен 15-й параметр
+    SearchModeCallback search_mode_cb, ManualControlCallback manual_cb,
+    WaypointModeCallback waypoint_cb,
+    WaypointDeleteCallback waypoint_del_cb,
+    WaypointAddCallback waypoint_add_cb,
+    WaypointSkipCallback waypoint_skip_cb,
+    WaypointListCallback waypoint_list_cb,
+    WaypointSpeedCallback waypoint_speed_cb)
     : port_(port), attack_callback_(std::move(attack_cb)),
       auto_mode_callback_(std::move(auto_cb)), gps_query_callback_(std::move(gps_cb)),
       home_callback_(std::move(home_cb)), arm_callback_(std::move(arm_cb)),
       land_callback_(std::move(land_cb)), search_callback_(std::move(search_round_cb)),
-      search_mode_callback_(std::move(search_mode_cb)),  // ← Инициализация нового поля
+      search_mode_callback_(std::move(search_mode_cb)),
       up_callback_(std::move(up_cb)), down_callback_(std::move(down_cb)),
       patrol_callback_(std::move(patrol_cb)), hold_callback_(std::move(hold_cb)),
-      manual_control_callback_(std::move(manual_cb)), // 🆕
+      manual_control_callback_(std::move(manual_cb)),
+      waypoint_mode_callback_(std::move(waypoint_cb)),
+      waypoint_delete_callback_(std::move(waypoint_del_cb)),
+      waypoint_add_callback_(std::move(waypoint_add_cb)),
+      waypoint_skip_callback_(std::move(waypoint_skip_cb)),
+      waypoint_list_callback_(std::move(waypoint_list_cb)),
+      waypoint_speed_callback_(std::move(waypoint_speed_cb)),
       logger_(std::move(logger)) {}
 
   Commander::~Commander() { stop(); }
@@ -225,8 +237,164 @@ namespace los_guidance
         return;
     }
 
+    // 🆕 2.2 Обработка set_mode: waypoint
+    if (data.find("\"set_mode\"") != std::string::npos &&
+        data.find("waypoint") != std::string::npos)
+    {
+        RCLCPP_INFO(logger_, "🗺️ Received command: set_mode waypoint");
+        if (waypoint_mode_callback_) waypoint_mode_callback_();
+        sendResponse(client_fd, "{\"status\":\"success\",\"command\":\"SET_MODE\",\"mode\":\"waypoint\"}\n");
+        return;
+    }
 
-    // 🆕 2.1 Обработка arm/disarm
+    // 🆕 2.3 Обработка waypoint_delete
+    if (data.find("\"waypoint_delete\"") != std::string::npos)
+    {
+        int index = -1;
+        size_t key_pos = data.find("\"waypoint_delete\"");
+        size_t colon_pos = data.find(':', key_pos);
+        if (colon_pos != std::string::npos)
+        {
+            std::string val = data.substr(colon_pos + 1);
+            val.erase(0, val.find_first_not_of(" \t\r\n"));
+            size_t end_pos = val.find_first_of(",} \t\r\n");
+            if (end_pos != std::string::npos)
+                val = val.substr(0, end_pos);
+            try { index = std::stoi(val); }
+            catch (...) { index = -1; }
+        }
+
+        if (index >= 0)
+        {
+            RCLCPP_INFO(logger_, "🗑️ Received command: waypoint_delete index=%d", index);
+            if (waypoint_delete_callback_) waypoint_delete_callback_(index);
+            std::ostringstream resp;
+            resp << "{\"status\":\"success\",\"command\":\"WAYPOINT_DELETE\",\"data\":{\"index\":" << index << "}}\n";
+            sendResponse(client_fd, resp.str());
+        }
+        else
+        {
+            sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"WAYPOINT_DELETE\",\"message\":\"Invalid index\"}\n");
+        }
+        return;
+    }
+
+    // 🆕 2.4 Обработка waypoint_add (формат: {"waypoint_add": {"index": N, "data": "lon,lat,action,param"}})
+    if (data.find("\"waypoint_add\"") != std::string::npos)
+    {
+        int add_index = -1;
+        std::string waypoint_data;
+
+        // Парсим index
+        size_t idx_key = data.find("\"index\"");
+        if (idx_key != std::string::npos)
+        {
+            size_t colon_pos = data.find(':', idx_key);
+            if (colon_pos != std::string::npos)
+            {
+                std::string val = data.substr(colon_pos + 1);
+                val.erase(0, val.find_first_not_of(" \t\r\n"));
+                size_t end_pos = val.find_first_of(",} \t\r\n");
+                if (end_pos != std::string::npos)
+                    val = val.substr(0, end_pos);
+                try { add_index = std::stoi(val); }
+                catch (...) { add_index = -1; }
+            }
+        }
+
+        // Парсим data (строка "lon,lat,action,param")
+        size_t data_key = data.find("\"data\"");
+        if (data_key != std::string::npos)
+        {
+            size_t colon_pos = data.find(':', data_key);
+            if (colon_pos != std::string::npos)
+            {
+                std::string val = data.substr(colon_pos + 1);
+                val.erase(0, val.find_first_not_of(" \t\r\n\""));
+                size_t end_pos = val.find_first_of("\"}");
+                if (end_pos != std::string::npos)
+                    waypoint_data = val.substr(0, end_pos);
+                else
+                    waypoint_data = val;
+                // Удаляем trailing кавычку если есть
+                if (!waypoint_data.empty() && waypoint_data.back() == '\"')
+                    waypoint_data.pop_back();
+            }
+        }
+
+        if (add_index >= 0 && !waypoint_data.empty())
+        {
+            RCLCPP_INFO(logger_, "➕ Received command: waypoint_add index=%d data=%s", add_index, waypoint_data.c_str());
+            if (waypoint_add_callback_) waypoint_add_callback_(add_index, waypoint_data);
+            std::ostringstream resp;
+            resp << "{\"status\":\"success\",\"command\":\"WAYPOINT_ADD\",\"data\":{\"index\":" << add_index << ",\"waypoint\":\"" << waypoint_data << "\"}}\n";
+            sendResponse(client_fd, resp.str());
+        }
+        else
+        {
+            sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"WAYPOINT_ADD\",\"message\":\"Invalid index or data\"}\n");
+        }
+        return;
+    }
+
+    // 🆕 2.5 Обработка waypoint_skip
+    if (data.find("\"waypoint_skip\"") != std::string::npos)
+    {
+        RCLCPP_INFO(logger_, "⏭️ Received command: waypoint_skip");
+        if (waypoint_skip_callback_) waypoint_skip_callback_();
+        sendResponse(client_fd, "{\"status\":\"success\",\"command\":\"WAYPOINT_SKIP\"}\n");
+        return;
+    }
+
+    // 🆕 2.6 Обработка waypoint_list
+    if (data.find("\"waypoint_list\"") != std::string::npos)
+    {
+        RCLCPP_INFO(logger_, "📋 Received command: waypoint_list");
+        if (waypoint_list_callback_)
+        {
+            std::string json = waypoint_list_callback_();
+            sendResponse(client_fd, json + "\n");
+        }
+        else
+        {
+            sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"WAYPOINT_LIST\",\"message\":\"No callback registered\"}\n");
+        }
+        return;
+    }
+
+    // 🆕 2.7 Обработка waypoint_speed
+    if (data.find("\"waypoint_speed\"") != std::string::npos)
+    {
+        double speed = 7.0; // значение по умолчанию
+        size_t key_pos = data.find("\"waypoint_speed\"");
+        size_t colon_pos = data.find(':', key_pos);
+        if (colon_pos != std::string::npos)
+        {
+            std::string val = data.substr(colon_pos + 1);
+            val.erase(0, val.find_first_not_of(" \t\r\n"));
+            size_t end_pos = val.find_first_of(",} \t\r\n");
+            if (end_pos != std::string::npos)
+                val = val.substr(0, end_pos);
+            try { speed = std::stod(val); }
+            catch (...) { speed = -1.0; }
+        }
+
+        if (speed > 0.0)
+        {
+            RCLCPP_INFO(logger_, "🚀 Received command: waypoint_speed speed=%.1f m/s", speed);
+            if (waypoint_speed_callback_) waypoint_speed_callback_(speed);
+            std::ostringstream resp;
+            resp << "{\"status\":\"success\",\"command\":\"WAYPOINT_SPEED\",\"data\":{\"speed\":" << speed << "}}\n";
+            sendResponse(client_fd, resp.str());
+        }
+        else
+        {
+            sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"WAYPOINT_SPEED\",\"message\":\"Invalid speed (must be > 0)\"}\n");
+        }
+        return;
+    }
+
+    // 🆕 2.8 Обработка arm/disarm
     if (data.find("\"arm\"") != std::string::npos)
     {
       bool arm = false;

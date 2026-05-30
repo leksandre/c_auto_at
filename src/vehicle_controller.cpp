@@ -347,7 +347,8 @@ namespace los_guidance
   bool VehicleController::publishPositionSetpoint(
       const Eigen::Vector3d &pos_setpoint,
       const Eigen::Vector3d &velocity,
-      const Eigen::Vector3d &acceleration)
+      const Eigen::Vector3d &acceleration,
+      double yaw)
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -394,7 +395,7 @@ namespace los_guidance
     }
 
     // === 4. Yaw и время ===
-    msg.yaw = NAN;
+    msg.yaw = static_cast<float>(yaw);
     msg.timestamp = getCurrentTimestamp_();
 
     traj_pub_->publish(msg);

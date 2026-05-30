@@ -33,6 +33,12 @@ namespace los_guidance
     using HoldSquareCallback = std::function<void(double)>;  // hold square size (m)
     using SearchModeCallback = std::function<void()>;        // 🆕 set_mode search
     using ManualControlCallback = std::function<void(float, float, float, float)>; // roll, pitch, yaw, throttle
+    using WaypointModeCallback = std::function<void()>;      // 🆕 set_mode waypoint
+    using WaypointDeleteCallback = std::function<void(int)>; // 🆕 waypoint_delete by index
+    using WaypointAddCallback = std::function<void(int, const std::string&)>; // 🆕 waypoint_add at index
+    using WaypointSkipCallback = std::function<void()>;      // 🆕 waypoint_skip
+    using WaypointListCallback = std::function<std::string()>; // 🆕 waypoint_list — returns JSON
+    using WaypointSpeedCallback = std::function<void(double)>;  // 🆕 waypoint_speed — set speed
 
     explicit Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
                        GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger,
@@ -44,7 +50,13 @@ namespace los_guidance
                        PatrolRoundCallback patrol_cb = nullptr,       // 🆕
                        HoldSquareCallback hold_cb = nullptr,          // 🆕
                        SearchModeCallback search_mode_cb = nullptr,   // 🆕
-                       ManualControlCallback manual_cb = nullptr); // 🆕
+                       ManualControlCallback manual_cb = nullptr,     // 🆕
+                       WaypointModeCallback waypoint_cb = nullptr,    // 🆕 set_mode waypoint
+                       WaypointDeleteCallback waypoint_del_cb = nullptr,   // 🆕 waypoint_delete
+                       WaypointAddCallback waypoint_add_cb = nullptr,      // 🆕 waypoint_add
+                       WaypointSkipCallback waypoint_skip_cb = nullptr,   // 🆕 waypoint_skip
+                       WaypointListCallback waypoint_list_cb = nullptr,  // 🆕 waypoint_list
+                       WaypointSpeedCallback waypoint_speed_cb = nullptr); // 🆕 waypoint_speed
 
     ~Commander();
 
@@ -75,6 +87,12 @@ namespace los_guidance
     PatrolRoundCallback patrol_callback_;
     HoldSquareCallback hold_callback_;
     ManualControlCallback manual_control_callback_; // 🆕
+    WaypointModeCallback waypoint_mode_callback_;   // 🆕 set_mode waypoint
+    WaypointDeleteCallback waypoint_delete_callback_; // 🆕 waypoint_delete
+    WaypointAddCallback waypoint_add_callback_;       // 🆕 waypoint_add
+    WaypointSkipCallback waypoint_skip_callback_;     // 🆕 waypoint_skip
+    WaypointListCallback waypoint_list_callback_;     // 🆕 waypoint_list
+    WaypointSpeedCallback waypoint_speed_callback_;   // 🆕 waypoint_speed
     rclcpp::Logger logger_;
     std::thread listen_thread_;
     std::atomic<bool> running_{false};

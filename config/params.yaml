@@ -1,7 +1,7 @@
 los_guidance_node:
   ros__parameters:
     attack:
-      max_approach_distance_m: 5.0  # 200.0
+      max_approach_distance_m: 50.0  # 200.0
     gps:
       source: "uart"   # Меняйте на "uart", чтобы использовать внешний GPS
     uart_gps:
@@ -12,11 +12,11 @@ los_guidance_node:
       throttle_interval_ms: 136000
     takeoff:
       climb_rate_mps: -1.0  # 10 м/с
-      target_altitude_m: 60.0 
+      target_altitude_m: 100.0 
       altitude_threshold_m: 1.5 
       min_altitude_already_flying_m: 2.0 
       min_cycles_for_already_flying: 120 
-      skip: true                    # Пропуск взлёта
+      skip: false                    # Пропуск взлёта
       visual_searching: true         # 🔍 Визуальный поиск после взлёта
       visual_search_timeout_s: 300   # ⏰ 5 минут ожидания
       timeout_s: 5 # 20 секунд для нормального взлёта
@@ -129,6 +129,13 @@ los_guidance_node:
       retention_us: 320000         # ↑ Было 200000 (×1.6)
       debug: true
     
+    # === Waypoint tracking ===
+    waypoint:
+      arrival_tolerance_m: 30.0    # Допуск прибытия в точку маршрута (м)
+      speed_mps: 7.0               # 🆕 Скорость движения между waypoint (м/с)
+      gps_loss_timeout_s: 600.0   # 🆕 Таймаут потери GPS перед посадкой (с), 600 = 10 мин
+      max_radius_from_home_m: 50000.0  # 🆕 Максимальное расстояние от стартовой точки (м), 20 км
+
     # === Таймеры ===
     timer:
       update_ms: 25                # ↑ Было 20 (тяжёлый медленнее)
@@ -137,6 +144,7 @@ los_guidance_node:
       enable: true
       port: 11472
       targets: [ "192.168.14.169", "192.168.14.175", "192.168.14.179"] # если лист пустой... какая логика?
+      gps_waypoints: ["51.992795,5.853739,wait,300", "55.75393,55.75438,wait,300", "55.75450,55.75361,wait,300", "55.75313,55.75393,wait,300"]
       target_port: 11472  # Порт, на котором цели слушают запросы SHOWGPS //11471 было
     
     # === Clamp Modifications ===

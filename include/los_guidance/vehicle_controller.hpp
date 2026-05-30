@@ -253,7 +253,8 @@ namespace los_guidance
     bool publishPositionSetpoint(
         const Eigen::Vector3d &pos_setpoint,
         const Eigen::Vector3d &velocity = Eigen::Vector3d(NAN, NAN, NAN),
-        const Eigen::Vector3d &acceleration = Eigen::Vector3d(NAN, NAN, NAN));
+        const Eigen::Vector3d &acceleration = Eigen::Vector3d(NAN, NAN, NAN),
+        double yaw = NAN);
 
     /**
      * @brief Публикация режима управления Offboard

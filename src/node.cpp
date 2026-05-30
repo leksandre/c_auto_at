@@ -302,11 +302,50 @@ namespace los_guidance
     this->declare_parameter("commander.port", 11472);
     this->declare_parameter("commander.targets", std::vector<std::string>{});
     this->declare_parameter("commander.target_port", 11472); // 11471 было
+    this->declare_parameter("commander.gps_waypoints", std::vector<std::string>{});
+    this->declare_parameter("waypoint.arrival_tolerance_m", 30.0);
+    this->declare_parameter("waypoint.speed_mps", 7.0);
+    this->declare_parameter("waypoint.max_radius_from_home_m", 40000.0);
 
     commander_enabled_ = this->get_parameter("commander.enable").as_bool();
     commander_port_ = static_cast<int>(this->get_parameter("commander.port").as_int());
     commander_targets_ = this->get_parameter("commander.targets").as_string_array();
     target_query_port_ = static_cast<int>(this->get_parameter("commander.target_port").as_int());
+    config_.waypoint_arrival_tolerance_m = this->get_parameter("waypoint.arrival_tolerance_m").as_double();
+    waypoint_speed_ = this->get_parameter("waypoint.speed_mps").as_double();
+    config_.waypoint_gps_loss_timeout_s = this->get_parameter("waypoint.gps_loss_timeout_s").as_double();
+    config_.waypoint_max_radius_from_home_m = this->get_parameter("waypoint.max_radius_from_home_m").as_double();
+
+    // === Загрузка GPS waypoints ===
+    auto wp_strings = this->get_parameter("commander.gps_waypoints").as_string_array();
+    gps_waypoints_.clear();
+    for (const auto &wp_str : wp_strings)
+    {
+      // Формат: "lon,lat,action,param"
+      std::istringstream ss(wp_str);
+      std::string token;
+      std::vector<std::string> parts;
+      while (std::getline(ss, token, ','))
+      {
+        parts.push_back(token);
+      }
+      if (parts.size() >= 3)
+      {
+        Waypoint wp;
+        wp.lon = std::stod(parts[0]);
+        wp.lat = std::stod(parts[1]);
+        wp.action = parts[2];
+        wp.param = (parts.size() >= 4) ? std::stod(parts[3]) : 0.0;
+        gps_waypoints_.push_back(wp);
+        RCLCPP_INFO(this->get_logger(), "🗺️ Waypoint %zu: lon=%.6f lat=%.6f action=%s param=%.1f",
+                    gps_waypoints_.size() - 1, wp.lon, wp.lat, wp.action.c_str(), wp.param);
+      }
+      else
+      {
+        RCLCPP_WARN(this->get_logger(), "⚠️ Invalid waypoint format: '%s' (expected 'lon,lat,action,param')", wp_str.c_str());
+      }
+    }
+    RCLCPP_INFO(this->get_logger(), "🗺️ Loaded %zu GPS waypoints", gps_waypoints_.size());
 
     RCLCPP_INFO(this->get_logger(), "🔧 Commander enable: %s | Port: %d | Targets: %zu",
                 commander_enabled_ ? "TRUE" : "FALSE", commander_port_, commander_targets_.size());
@@ -965,6 +1004,46 @@ namespace los_guidance
               //                       acc_cmd.x(), acc_cmd.y(), acc_cmd.z());
             
           
+          },
+          // 🆕 Колбэк для set_mode: waypoint
+          [this]()
+          {
+            {
+              std::lock_guard<std::mutex> lock(state_mutex_);
+              if (auto_phase_ == AutoPhase::GPS_WAYPOINT_TRACKING)
+              {
+                RCLCPP_WARN(this->get_logger(), "🗺️ GPS_WAYPOINT_TRACKING already active — ignoring duplicate start");
+                return;
+              }
+            }
+            std::thread(&Node::executeWaypointTrackingSequence, this).detach();
+          },
+          // 🆕 Колбэк для waypoint_delete
+          [this](int index)
+          {
+            waypointDeleteByIndex(index);
+          },
+          // 🆕 Колбэк для waypoint_add
+          [this](int index, const std::string& waypoint_str)
+          {
+            waypointAddAtIndex(index, waypoint_str);
+          },
+          // 🆕 Колбэк для waypoint_skip
+          [this]()
+          {
+            waypointSkipCurrent();
+          },
+          // 🆕 Колбэк для waypoint_list
+          [this]() -> std::string
+          {
+            return waypointListJson();
+          },
+          // 🆕 Колбэк для waypoint_speed
+          [this](double speed)
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            waypoint_speed_ = speed;
+            RCLCPP_INFO(this->get_logger(), "🚀 Waypoint speed set to %.1f m/s", waypoint_speed_);
           }
         
         ); // ← Закрывающая скобка конструктора Commander
@@ -2005,6 +2084,283 @@ namespace los_guidance
 
         return; // Выходим, чтобы в следующем тике сработала логика VISUAL_SEARCH
       }
+    }
+
+    // === ФАЗА 2: GPS WAYPOINT TRACKING ===
+    if (current_phase == AutoPhase::GPS_WAYPOINT_TRACKING)
+    {
+      if (local_takeoff_abort)
+      {
+        handleTakeoffAbort();
+        return;
+      }
+
+      // === GPS Loss Detection with Timeout ===
+      if (!local_drone_gps.is_valid)
+      {
+        if (!gps_loss_active_)
+        {
+          gps_loss_active_ = true;
+          gps_loss_start_ = std::chrono::steady_clock::now();
+          gps_loss_landing_triggered_ = false;
+          RCLCPP_WARN(this->get_logger(), "⚠️ GPS LOST — hovering in place. Will land after %.0f s timeout.",
+                      config_.waypoint_gps_loss_timeout_s);
+        }
+
+        auto gps_loss_elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - gps_loss_start_).count();
+
+        if (gps_loss_elapsed >= config_.waypoint_gps_loss_timeout_s && !gps_loss_landing_triggered_)
+        {
+          RCLCPP_ERROR(this->get_logger(), "🛬 GPS loss timeout (%.0f s) — LANDING!",
+                       config_.waypoint_gps_loss_timeout_s);
+          gps_loss_landing_triggered_ = true;
+          px4_msgs::msg::VehicleCommand cmd;
+          cmd.command = 21; // MAV_CMD_NAV_LAND
+          cmd.param7 = 1.0;
+          cmd.target_system = 1;
+          cmd.target_component = 1;
+          cmd.from_external = true;
+          cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+          vehicle_cmd_pub_->publish(cmd);
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            auto_phase_ = AutoPhase::IDLE;
+            active_command_ = ActiveCommand::LAND;
+            active_command_param_ = 1.0;
+          }
+          return;
+        }
+
+        // Пока таймаут не истёк — висим на месте (hold position)
+        vehicle_ctrl_->publishOffboardControlMode();
+        px4_msgs::msg::TrajectorySetpoint hover_ts;
+        hover_ts.position = {NAN, NAN, NAN};
+        hover_ts.velocity = {NAN, NAN, NAN};
+        hover_ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        trajectory_setpoint_pub_->publish(hover_ts);
+
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "⚠️ GPS lost for %.0f/%.0f s — hovering...",
+                             gps_loss_elapsed, config_.waypoint_gps_loss_timeout_s);
+        return;
+      }
+      else
+      {
+        // GPS восстановился — сбрасываем флаги
+        if (gps_loss_active_)
+        {
+          RCLCPP_INFO(this->get_logger(), "✅ GPS recovered after %.1f s — resuming waypoint tracking",
+                      std::chrono::duration<double>(
+                          std::chrono::steady_clock::now() - gps_loss_start_).count());
+          gps_loss_active_ = false;
+          gps_loss_landing_triggered_ = false;
+        }
+      }
+
+      // Инициализируем ref_gps_ при первом входе
+      if (!local_ref_gps_valid && local_drone_gps.is_valid)
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        ref_gps_.lat = local_drone_gps.lat;
+        ref_gps_.lon = local_drone_gps.lon;
+        ref_gps_.alt = local_drone_gps.alt;
+        ref_gps_valid_ = true;
+        local_ref_gps_valid = true;
+        RCLCPP_INFO(this->get_logger(), "📍 GPS_WAYPOINT: ref_gps set: %.6f, %.6f, %.2f",
+                    ref_gps_.lat, ref_gps_.lon, ref_gps_.alt);
+      }
+
+      if (!local_ref_gps_valid)
+      {
+        // Публикуем пустой setpoint для поддержания OFFBOARD
+        vehicle_ctrl_->publishOffboardControlMode();
+        px4_msgs::msg::TrajectorySetpoint hover_ts;
+        hover_ts.position = {NAN, NAN, NAN};
+        hover_ts.velocity = {NAN, NAN, NAN};
+        hover_ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        trajectory_setpoint_pub_->publish(hover_ts);
+        return;
+      }
+
+      // Получаем ref_gps для конвертации
+      double ref_lat, ref_lon, ref_alt;
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        ref_lat = ref_gps_.lat;
+        ref_lon = ref_gps_.lon;
+        ref_alt = ref_gps_.alt;
+      }
+
+      // === Обработка ожидания в waypoint ===
+      if (waypoint_waiting_)
+      {
+        auto elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - waypoint_wait_start_).count();
+        if (elapsed >= waypoint_wait_duration_)
+        {
+          RCLCPP_INFO(this->get_logger(), "⏱️ Wait finished (%.1f s). Moving to next waypoint.", elapsed);
+          waypoint_waiting_ = false;
+          current_waypoint_idx_++;
+        }
+        else
+        {
+          // Висим на месте — публикуем текущую позицию как setpoint
+          Eigen::Vector3d current_ned = gpsToNed(local_drone_gps.lat, local_drone_gps.lon,
+                                                  local_drone_gps.alt, ref_lat, ref_lon, ref_alt);
+          vehicle_ctrl_->publishOffboardControlMode();
+          vehicle_ctrl_->publishPositionSetpoint(current_ned,
+                                                 Eigen::Vector3d::Zero(),
+                                                 Eigen::Vector3d::Zero());
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                               "⏳ Waiting at waypoint %zu: %.1f / %.1f s",
+                               current_waypoint_idx_, elapsed, waypoint_wait_duration_);
+          return;
+        }
+      }
+
+      // === Обработка подъёма в waypoint ===
+      if (waypoint_climbing_)
+      {
+        auto elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - waypoint_climb_start_).count();
+        double current_alt_ned = gpsToNed(local_drone_gps.lat, local_drone_gps.lon,
+                                           local_drone_gps.alt, ref_lat, ref_lon, ref_alt).z();
+
+        // Целевая высота в NED: ref_alt - (start_alt_ + waypoint_climb_target_)
+        double target_alt_ned = ref_alt - (start_alt_ + waypoint_climb_target_);
+
+        if (std::abs(current_alt_ned - target_alt_ned) < 2.0 || elapsed > 10.0)
+        {
+          RCLCPP_INFO(this->get_logger(), "⬆️ Climb finished (%.1f m). Moving to next waypoint.", waypoint_climb_target_);
+          waypoint_climbing_ = false;
+          current_waypoint_idx_++;
+        }
+        else
+        {
+          // Поднимаемся — публикуем setpoint с новой высотой
+          Eigen::Vector3d climb_ned = gpsToNed(local_drone_gps.lat, local_drone_gps.lon,
+                                                local_drone_gps.alt, ref_lat, ref_lon, ref_alt);
+          climb_ned.z() = target_alt_ned;
+          vehicle_ctrl_->publishOffboardControlMode();
+          vehicle_ctrl_->publishPositionSetpoint(climb_ned,
+                                                 Eigen::Vector3d{3.0, 0.0, 0.0},
+                                                 Eigen::Vector3d{1.0, 0.0, 0.0});
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                               "⬆️ Climbing: current_alt=%.1f target_alt=%.1f",
+                               current_alt_ned, target_alt_ned);
+          return;
+        }
+      }
+
+      // === Получаем текущий waypoint ПОД МЬЮТЕКСОМ (защита от data race) ===
+      Waypoint current_wp;
+      size_t wp_idx;
+      size_t total_wps;
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        wp_idx = current_waypoint_idx_;
+        total_wps = gps_waypoints_.size();
+        if (wp_idx >= total_wps)
+        {
+          // Все waypoint пройдены (проверка под мьютексом)
+          RCLCPP_INFO(this->get_logger(), "🗺️ All waypoints completed! Switching to IDLE.");
+          auto_phase_ = AutoPhase::IDLE;
+          return;
+        }
+        current_wp = gps_waypoints_[wp_idx];
+      }
+
+      // Конвертируем waypoint в NED
+      Eigen::Vector3d wp_ned = gpsToNed(current_wp.lat, current_wp.lon, 0.0, ref_lat, ref_lon, ref_alt);
+
+      // Вычисляем расстояние до waypoint
+      double dist_to_wp = haversineDist(local_drone_gps.lat, local_drone_gps.lon, current_wp.lat, current_wp.lon);
+
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                           "🗺️ WP %zu/%zu: dist=%.1fm (tolerance=%.1fm) action=%s",
+                           wp_idx + 1, total_wps,
+                           dist_to_wp, config_.waypoint_arrival_tolerance_m, current_wp.action.c_str());
+
+      // === Вычисляем yaw в сторону waypoint ===
+      double dlon = (current_wp.lon - local_drone_gps.lon) * M_PI / 180.0;
+      double lat1_rad = local_drone_gps.lat * M_PI / 180.0;
+      double lat2_rad = current_wp.lat * M_PI / 180.0;
+      double yaw_to_wp = std::atan2(std::sin(dlon) * std::cos(lat2_rad),
+                                    std::cos(lat1_rad) * std::sin(lat2_rad) -
+                                    std::sin(lat1_rad) * std::cos(lat2_rad) * std::cos(dlon));
+
+      // === Проверка прибытия в waypoint ===
+      if (dist_to_wp < config_.waypoint_arrival_tolerance_m)
+      {
+        RCLCPP_INFO(this->get_logger(), "📍 Arrived at waypoint %zu (dist=%.1fm < %.1fm). Action: %s",
+                    wp_idx, dist_to_wp, config_.waypoint_arrival_tolerance_m, current_wp.action.c_str());
+
+        if (current_wp.action == "wait")
+        {
+          waypoint_waiting_ = true;
+          waypoint_wait_duration_ = current_wp.param;
+          waypoint_wait_start_ = std::chrono::steady_clock::now();
+          RCLCPP_INFO(this->get_logger(), "⏳ Waiting for %.1f seconds...", current_wp.param);
+        }
+        else if (current_wp.action == "land")
+        {
+          RCLCPP_INFO(this->get_logger(), "🛬 Landing at waypoint %zu", wp_idx);
+          px4_msgs::msg::VehicleCommand cmd;
+          cmd.command = 21; // MAV_CMD_NAV_LAND
+          cmd.param7 = 1.0;
+          cmd.target_system = 1;
+          cmd.target_component = 1;
+          cmd.from_external = true;
+          cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+          vehicle_cmd_pub_->publish(cmd);
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            auto_phase_ = AutoPhase::IDLE;
+            active_command_ = ActiveCommand::LAND;
+            active_command_param_ = 1.0;
+          }
+          return;
+        }
+        else if (current_wp.action == "up")
+        {
+          waypoint_climbing_ = true;
+          waypoint_climb_target_ = current_wp.param;
+          waypoint_climb_start_ = std::chrono::steady_clock::now();
+          RCLCPP_INFO(this->get_logger(), "⬆️ Climbing %.1f meters...", current_wp.param);
+        }
+        else
+        {
+          RCLCPP_WARN(this->get_logger(), "⚠️ Unknown waypoint action: '%s'. Moving to next.", current_wp.action.c_str());
+          current_waypoint_idx_++;
+        }
+
+        // Обновляем target_gps_ для следующего waypoint (если есть)
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          if (current_waypoint_idx_ < gps_waypoints_.size())
+          {
+            const auto &next_wp = gps_waypoints_[current_waypoint_idx_];
+            target_gps_ = {next_wp.lat, next_wp.lon, 0.0, 0, true};
+          }
+        }
+
+        return;
+      }
+
+      // === Летим к waypoint с yaw в его сторону ===
+      double current_speed;
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_speed = waypoint_speed_;
+      }
+      vehicle_ctrl_->publishOffboardControlMode();
+      vehicle_ctrl_->publishPositionSetpoint(wp_ned,
+                                             Eigen::Vector3d{current_speed, 0.0, 0.0},  // скорость
+                                             Eigen::Vector3d{2.5, 0.0, 0.0},   // ускорение
+                                             yaw_to_wp                        // yaw в сторону waypoint
+      );
+      return;
     }
 
     // === ФАЗА 2.5: ВИЗУАЛЬНЫЙ ПОИСК (Yaw Tracking + Hover) ===
@@ -3548,6 +3904,336 @@ namespace los_guidance
     RCLCPP_INFO(this->get_logger(), "💡 Tip: Send {\"start_attack\": true} to begin attack.");
   }
 
+  void Node::executeWaypointTrackingSequence()
+  {
+    RCLCPP_INFO(this->get_logger(), "🗺️ Starting GPS WAYPOINT TRACKING sequence...");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // === 1. Проверка GPS и спутников ===
+    int satellites = 0;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (!drone_gps_.is_valid)
+      {
+        RCLCPP_ERROR(this->get_logger(), "❌ GPS_WAYPOINT: Drone GPS not valid — aborting");
+        return;
+      }
+      // Пытаемся получить количество спутников из UART GPS парсера
+      if (use_uart_gps_)
+      {
+        satellites = uart_gps_parser_.getData().satellites;
+      }
+    }
+
+    if (satellites > 0 && satellites < 3)
+    {
+      RCLCPP_ERROR(this->get_logger(), "❌ GPS_WAYPOINT: Only %d satellites — need at least 3", satellites);
+      return;
+    }
+    RCLCPP_INFO(this->get_logger(), "✅ GPS_WAYPOINT: GPS valid, satellites: %d", satellites);
+
+    // === 2. Проверка наличия waypoints ===
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (gps_waypoints_.empty())
+      {
+        RCLCPP_ERROR(this->get_logger(), "❌ GPS_WAYPOINT: No waypoints loaded — aborting");
+        return;
+      }
+      RCLCPP_INFO(this->get_logger(), "🗺️ GPS_WAYPOINT: %zu waypoints loaded", gps_waypoints_.size());
+    }
+
+    // === 3. Сохраняем стартовую позицию ===
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (drone_gps_.is_valid)
+      {
+        start_lat_ = drone_gps_.lat;
+        start_lon_ = drone_gps_.lon;
+        start_alt_ = drone_gps_.alt;
+        start_gps_valid_ = true;
+        RCLCPP_INFO(this->get_logger(), "🏠 Start position saved: %.6f, %.6f, %.2f",
+                    start_lat_, start_lon_, start_alt_);
+      }
+    }
+
+    // === 3a. Проверка максимального радиуса для всех waypoints ===
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (start_gps_valid_)
+      {
+        for (size_t i = 0; i < gps_waypoints_.size(); ++i)
+        {
+          const auto &wp = gps_waypoints_[i];
+          double dist = haversineDist(start_lat_, start_lon_, wp.lat, wp.lon);
+          if (dist > config_.waypoint_max_radius_from_home_m)
+          {
+            RCLCPP_ERROR(this->get_logger(),
+                         "❌ GPS_WAYPOINT: Waypoint %zu (%.6f, %.6f) is %.0f m from start — exceeds max radius %.0f m. Aborting.",
+                         i, wp.lat, wp.lon, dist, config_.waypoint_max_radius_from_home_m);
+            return;
+          }
+        }
+        RCLCPP_INFO(this->get_logger(), "✅ GPS_WAYPOINT: All waypoints within max radius (%.0f m)", config_.waypoint_max_radius_from_home_m);
+      }
+    }
+
+    // === 4. Arm ===
+    sendArmCommand(true);
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // === 5. OFFBOARD режим ===
+    RCLCPP_INFO(this->get_logger(), "📡 Switching to OFFBOARD mode...");
+    for (int i = 0; i < 10; ++i)
+    {
+      vehicle_ctrl_->setOffboardMode();
+      vehicle_ctrl_->publishOffboardControlMode();
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // === 6. Взлёт ===
+    bool skip_takeoff = this->get_parameter("takeoff.skip").as_bool();
+    RCLCPP_INFO(this->get_logger(), "🔧 Takeoff skip: %s", skip_takeoff ? "YES" : "NO");
+    executeTakeoffSequence(skip_takeoff);
+
+    // === 7. Ждём ref_gps_ ===
+    RCLCPP_INFO(this->get_logger(), "⏳ Waiting for ref_gps_ to be valid...");
+    auto wait_start = std::chrono::steady_clock::now();
+    while (!ref_gps_valid_ && (std::chrono::steady_clock::now() - wait_start) < std::chrono::seconds(5))
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    if (!ref_gps_valid_)
+    {
+      RCLCPP_ERROR(this->get_logger(), "❌ GPS_WAYPOINT: ref_gps_ not valid — aborting");
+      return;
+    }
+
+    // === 8. Устанавливаем первый waypoint как цель и переходим в фазу GPS_WAYPOINT_TRACKING ===
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      current_waypoint_idx_ = 0;
+      waypoint_waiting_ = false;
+      waypoint_climbing_ = false;
+
+      // Устанавливаем target_gps_ на первый waypoint
+      const auto &wp = gps_waypoints_[0];
+      target_gps_ = {wp.lat, wp.lon, 0.0, 0, true};
+      RCLCPP_INFO(this->get_logger(), "🗺️ First waypoint target: lon=%.6f, lat=%.6f, action=%s, param=%.1f",
+                  wp.lon, wp.lat, wp.action.c_str(), wp.param);
+
+      auto_phase_ = AutoPhase::GPS_WAYPOINT_TRACKING;
+      start_attack_ = false;
+      attack_enabled_ = false;
+      attack_ready_.store(false, std::memory_order_release);
+      guidance_ctrl_->reset();
+    }
+
+    RCLCPP_INFO(this->get_logger(), "✅ GPS WAYPOINT TRACKING mode ACTIVE");
+  }
+
+  // 🆕 Удаление waypoint по индексу
+  void Node::waypointDeleteByIndex(int index)
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (index < 0 || static_cast<size_t>(index) >= gps_waypoints_.size())
+    {
+      RCLCPP_WARN(this->get_logger(), "🗑️ waypoint_delete: index %d out of range (size=%zu)", index, gps_waypoints_.size());
+      return;
+    }
+
+    RCLCPP_INFO(this->get_logger(), "🗑️ Deleting waypoint %d: lat=%.6f, lon=%.6f, action=%s, param=%.1f",
+                index, gps_waypoints_[index].lat, gps_waypoints_[index].lon,
+                gps_waypoints_[index].action.c_str(), gps_waypoints_[index].param);
+
+    gps_waypoints_.erase(gps_waypoints_.begin() + index);
+
+    // Корректируем current_waypoint_idx_ если нужно
+    if (static_cast<size_t>(index) < current_waypoint_idx_)
+    {
+      // Удалили точку ДО текущей — сдвигаем индекс влево
+      current_waypoint_idx_--;
+    }
+    else if (static_cast<size_t>(index) == current_waypoint_idx_)
+    {
+      // Удалили ТЕКУЩУЮ точку — сбрасываем флаги ожидания/подъёма
+      waypoint_waiting_ = false;
+      waypoint_climbing_ = false;
+      RCLCPP_INFO(this->get_logger(), "🗑️ Current waypoint deleted — wait/climb flags reset");
+
+      // Сбрасываем на начало (или на 0, если пусто)
+      if (gps_waypoints_.empty())
+      {
+        current_waypoint_idx_ = 0;
+        RCLCPP_WARN(this->get_logger(), "🗑️ All waypoints deleted, resetting to 0");
+      }
+      else if (current_waypoint_idx_ >= gps_waypoints_.size())
+      {
+        current_waypoint_idx_ = gps_waypoints_.size() - 1;
+      }
+      // Если удалили текущую, но ещё есть точки — остаёмся на том же индексе
+      // (вектор сдвинулся, и следующий waypoint теперь на этом индексе)
+    }
+    // Если удалили ПОСЛЕ текущей — индекс не меняем
+
+    RCLCPP_INFO(this->get_logger(), "🗑️ Waypoint deleted. Remaining: %zu, current_idx: %zu",
+                gps_waypoints_.size(), current_waypoint_idx_);
+  }
+
+  // 🆕 Добавление waypoint по индексу
+  void Node::waypointAddAtIndex(int index, const std::string& waypoint_str)
+  {
+    // Парсим строку формата "lat,lon,action,param"
+    // Например: "51.992795,5.853739,wait,300"
+    std::vector<std::string> parts;
+    std::stringstream ss(waypoint_str);
+    std::string token;
+    while (std::getline(ss, token, ','))
+    {
+      parts.push_back(token);
+    }
+
+    if (parts.size() < 3)
+    {
+      RCLCPP_WARN(this->get_logger(), "➕ waypoint_add: invalid format '%s' — expected 'lat,lon,action,param'", waypoint_str.c_str());
+      return;
+    }
+
+    Waypoint wp;
+    try
+    {
+      wp.lat = std::stod(parts[0]);
+      wp.lon = std::stod(parts[1]);
+      wp.action = parts[2];
+      wp.param = (parts.size() >= 4) ? std::stod(parts[3]) : 0.0;
+    }
+    catch (...)
+    {
+      RCLCPP_WARN(this->get_logger(), "➕ waypoint_add: failed to parse numeric values from '%s'", waypoint_str.c_str());
+      return;
+    }
+
+    // Валидация координат
+    if (wp.lat < -90.0 || wp.lat > 90.0)
+    {
+      RCLCPP_WARN(this->get_logger(), "➕ waypoint_add: invalid latitude %.6f — must be in [-90, 90]", wp.lat);
+      return;
+    }
+    if (wp.lon < -180.0 || wp.lon > 180.0)
+    {
+      RCLCPP_WARN(this->get_logger(), "➕ waypoint_add: invalid longitude %.6f — must be in [-180, 180]", wp.lon);
+      return;
+    }
+
+    // Валидация action
+    if (wp.action != "wait" && wp.action != "land" && wp.action != "up")
+    {
+      RCLCPP_WARN(this->get_logger(), "➕ waypoint_add: unknown action '%s' — must be wait/land/up", wp.action.c_str());
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(state_mutex_);
+
+    // Нормализуем индекс: если index > size, вставляем в конец
+    size_t insert_idx = (index < 0 || static_cast<size_t>(index) >= gps_waypoints_.size())
+                        ? gps_waypoints_.size()
+                        : static_cast<size_t>(index);
+
+    gps_waypoints_.insert(gps_waypoints_.begin() + insert_idx, wp);
+
+    // Корректируем current_waypoint_idx_ если вставили ДО или НА текущий индекс
+    if (insert_idx <= current_waypoint_idx_)
+    {
+      current_waypoint_idx_++;
+    }
+
+    RCLCPP_INFO(this->get_logger(), "➕ Waypoint added at index %zu: lat=%.6f, lon=%.6f, action=%s, param=%.1f. Total: %zu, current_idx: %zu",
+                insert_idx, wp.lat, wp.lon, wp.action.c_str(), wp.param,
+                gps_waypoints_.size(), current_waypoint_idx_);
+  }
+
+  // 🆕 Пропуск текущего waypoint — переход к следующему
+  void Node::waypointSkipCurrent()
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+
+    if (gps_waypoints_.empty())
+    {
+      RCLCPP_WARN(this->get_logger(), "⏭️ waypoint_skip: no waypoints to skip");
+      return;
+    }
+
+    if (current_waypoint_idx_ >= gps_waypoints_.size() - 1)
+    {
+      RCLCPP_INFO(this->get_logger(), "⏭️ waypoint_skip: already at last waypoint (%zu/%zu), cannot skip",
+                  current_waypoint_idx_, gps_waypoints_.size() - 1);
+      return;
+    }
+
+    // Сбрасываем флаги ожидания/подъёма
+    waypoint_waiting_ = false;
+    waypoint_climbing_ = false;
+
+    // Переходим к следующему waypoint
+    current_waypoint_idx_++;
+    const auto &wp = gps_waypoints_[current_waypoint_idx_];
+    target_gps_ = {wp.lat, wp.lon, 0.0, 0, true};
+
+    RCLCPP_INFO(this->get_logger(), "⏭️ Skipped to waypoint %zu/%zu: lon=%.6f, lat=%.6f, action=%s, param=%.1f",
+                current_waypoint_idx_, gps_waypoints_.size() - 1,
+                wp.lon, wp.lat, wp.action.c_str(), wp.param);
+  }
+
+  std::string Node::waypointListJson()
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+
+    // Если waypoint'ов нет — возвращаем пустой список
+    if (gps_waypoints_.empty())
+    {
+      return "{\"status\":\"success\",\"command\":\"WAYPOINT_LIST\",\"data\":{"
+             "\"current_index\":0,\"total\":0,\"speed\":" + std::to_string(waypoint_speed_) + ","
+             "\"waypoints\":[]}}";
+    }
+
+    std::string json = "{\"status\":\"success\",\"command\":\"WAYPOINT_LIST\",\"data\":{"
+                       "\"current_index\":" + std::to_string(current_waypoint_idx_) + ","
+                       "\"total\":" + std::to_string(gps_waypoints_.size()) + ","
+                       "\"speed\":" + std::to_string(waypoint_speed_) + ","
+                       "\"waypoints\":[";
+
+    for (size_t i = 0; i < gps_waypoints_.size(); ++i)
+    {
+      const auto &wp = gps_waypoints_[i];
+
+      // Определяем статус waypoint
+      std::string status;
+      if (i < current_waypoint_idx_)
+        status = "completed";
+      else if (i == current_waypoint_idx_)
+        status = "active";
+      else
+        status = "pending";
+
+      if (i > 0)
+        json += ",";
+
+      json += "{"
+              "\"index\":" + std::to_string(i) + ","
+              "\"lon\":" + std::to_string(wp.lon) + ","
+              "\"lat\":" + std::to_string(wp.lat) + ","
+              "\"action\":\"" + wp.action + "\","
+              "\"param\":" + std::to_string(wp.param) + ","
+              "\"status\":\"" + status + "\""
+              "}";
+    }
+
+    json += "]}}";
+    return json;
+  }
+
   void Node::declareCommonParameters()
   {
 
@@ -3594,6 +4280,12 @@ namespace los_guidance
 
     this->declare_parameter("takeoff.visual_searching", false);
     this->declare_parameter("takeoff.visual_search_timeout_s", 300); // 5 минут по умолчанию
+
+    // Waypoint parameters
+    this->declare_parameter("waypoint.arrival_tolerance_m", 30.0);
+    this->declare_parameter("waypoint.speed_mps", 7.0);
+    this->declare_parameter("waypoint.gps_loss_timeout_s", 1800.0); // 30 минут
+    this->declare_parameter("waypoint.max_radius_from_home_m", 40000.0); // 20 км
 
     RCLCPP_DEBUG(this->get_logger(), "✓ All parameters declared successfully");
   }

@@ -171,6 +171,11 @@ namespace los_guidance
     double kp_yaw_track{0.5};  // 🆕
     double max_approach_distance{200.0};  ///< Максимальное расстояние для перехода в визуальную атаку (м)
 
+    // Waypoint tracking параметры
+    double waypoint_arrival_tolerance_m{30.0};  ///< Допуск прибытия в точку маршрута (м)
+    double waypoint_gps_loss_timeout_s{1800.0}; ///< Таймаут потери GPS перед посадкой (с), 1800 = 30 мин
+    double waypoint_max_radius_from_home_m{20000.0}; ///< Максимальное расстояние от стартовой точки (м), 20 км
+
     // Параметры ручного управления
     int manual_control_update_rate_hz{20};
     double manual_control_deadzone{0.05};
@@ -479,7 +484,8 @@ bool update_acc_setpoint_{false};
       IDLE,
       GPS_APPROACH,
       VISUAL_ATTACK,
-      VISUAL_SEARCH
+      VISUAL_SEARCH,
+      GPS_WAYPOINT_TRACKING
     };
     AutoPhase auto_phase_ = AutoPhase::IDLE;
 
@@ -550,6 +556,28 @@ bool update_acc_setpoint_{false};
 
     GpsState drone_gps_;
 
+    // === GPS Waypoint Tracking ===
+    struct Waypoint
+    {
+      double lat, lon;       // координаты точки
+      std::string action;    // "wait", "land", "up"
+      double param;          // параметр: секунды ожидания, метры подъёма
+    };
+    std::vector<Waypoint> gps_waypoints_;         ///< Загруженные waypoint из params.yaml
+    size_t current_waypoint_idx_{0};              ///< Индекс текущего waypoint
+    std::chrono::steady_clock::time_point waypoint_wait_start_;  ///< Время начала ожидания в waypoint
+    bool waypoint_waiting_{false};                ///< Флаг: дрон ожидает в waypoint
+    double waypoint_wait_duration_{0.0};          ///< Длительность ожидания (секунды)
+    bool waypoint_climbing_{false};               ///< Флаг: дрон выполняет подъём
+    double waypoint_climb_target_{0.0};           ///< Целевая высота подъёма (метры)
+    std::chrono::steady_clock::time_point waypoint_climb_start_;  ///< Время начала подъёма
+    double waypoint_speed_{7.0};                ///< 🆕 Скорость движения между waypoint (м/с)
+
+    // GPS loss handling
+    std::chrono::steady_clock::time_point gps_loss_start_;  ///< Время начала потери GPS
+    bool gps_loss_active_{false};                ///< Флаг: GPS потерян
+    bool gps_loss_landing_triggered_{false};     ///< Флаг: посадка по таймауту GPS уже запущена
+
     static Eigen::Vector3d gpsToNed(double lat, double lon, double alt,
                                     double ref_lat, double ref_lon, double ref_alt);
 
@@ -593,9 +621,14 @@ bool update_acc_setpoint_{false};
     void executeAttackSetpoint_(const Eigen::Vector3d& acc_cmd);
 
     void executeAutoModeSequence();
-void executeSearchMode();                          // 🆕
+    void executeSearchMode();                          // 🆕
+    void executeWaypointTrackingSequence();            // 🆕 GPS_WAYPOINT_TRACKING
+    void waypointDeleteByIndex(int index);             // 🆕 waypoint_delete
+    void waypointAddAtIndex(int index, const std::string& waypoint_str); // 🆕 waypoint_add
+    void waypointSkipCurrent();                        // 🆕 waypoint_skip
+    std::string waypointListJson();                    // 🆕 waypoint_list — returns JSON
     static double haversineDist(double lat1, double lon1, double lat2, double lon2);
-     bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
+    bool queryTargetGPS(const std::string &ip, int port, double &out_lat, double &out_lon, double &out_alt, int &out_sats);
 
     // 🆕 Обработка прерывания взлёта
     void handleTakeoffAbort();
