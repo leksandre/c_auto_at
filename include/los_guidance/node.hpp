@@ -568,6 +568,7 @@ bool update_acc_setpoint_{false};
     std::chrono::steady_clock::time_point waypoint_wait_start_;  ///< Время начала ожидания в waypoint
     bool waypoint_waiting_{false};                ///< Флаг: дрон ожидает в waypoint
     double waypoint_wait_duration_{0.0};          ///< Длительность ожидания (секунды)
+    Eigen::Vector3d waypoint_wait_target_ned_;    ///< 🆕 Целевая NED позиция для удержания во время ожидания
     bool waypoint_climbing_{false};               ///< Флаг: дрон выполняет подъём
     double waypoint_climb_target_{0.0};           ///< Целевая высота подъёма (метры)
     std::chrono::steady_clock::time_point waypoint_climb_start_;  ///< Время начала подъёма

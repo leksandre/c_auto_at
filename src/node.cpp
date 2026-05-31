@@ -762,6 +762,23 @@ namespace los_guidance
                     static_cast<int>(auto_phase_));
             }
 
+            // === 0. Прерываем любой автономный режим при ручном управлении ===
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                if (auto_phase_ != AutoPhase::IDLE)
+                {
+                    RCLCPP_INFO(this->get_logger(), "🎮 Manual control: interrupting auto_phase_=%d -> IDLE",
+                                static_cast<int>(auto_phase_));
+                    auto_phase_ = AutoPhase::IDLE;
+                    waypoint_waiting_ = false;
+                    waypoint_climbing_ = false;
+                    waypoint_wait_target_ned_ = Eigen::Vector3d::Zero();
+                    start_attack_ = false;
+                    attack_enabled_ = false;
+                    guidance_ctrl_->reset();
+                }
+            }
+
             // === 0. Гарантируем OFFBOARD режим для TrajectorySetpoint ===
             if (vehicle_ctrl_->getCurrentMode() != FlightMode::OFFBOARD)
             {
@@ -2205,16 +2222,30 @@ namespace los_guidance
         }
         else
         {
-          // Висим на месте — публикуем текущую позицию как setpoint
+          // 🆕 Вычисляем текущую NED-позицию дрона
           Eigen::Vector3d current_ned = gpsToNed(local_drone_gps.lat, local_drone_gps.lon,
                                                   local_drone_gps.alt, ref_lat, ref_lon, ref_alt);
+
+          // 🆕 Вычисляем ошибку: target - current (в NED)
+          Eigen::Vector3d pos_error = waypoint_wait_target_ned_ - current_ned;
+
+          // 🆕 P-контроллер: скорость коррекции пропорциональна ошибке
+          // Коэффициент 0.5 означает: при отклонении 10 м → скорость 5 м/с
+          const double POS_HOLD_GAIN = 0.5;
+          Eigen::Vector3d correction_vel{
+              std::clamp(pos_error.x() * POS_HOLD_GAIN, -3.0, 3.0),
+              std::clamp(pos_error.y() * POS_HOLD_GAIN, -3.0, 3.0),
+              std::clamp(pos_error.z() * POS_HOLD_GAIN, -1.0, 1.0)};
+
           vehicle_ctrl_->publishOffboardControlMode();
-          vehicle_ctrl_->publishPositionSetpoint(current_ned,
-                                                 Eigen::Vector3d::Zero(),
+          vehicle_ctrl_->publishPositionSetpoint(waypoint_wait_target_ned_,
+                                                 correction_vel,
                                                  Eigen::Vector3d::Zero());
           RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
-                               "⏳ Waiting at waypoint %zu: %.1f / %.1f s",
-                               current_waypoint_idx_, elapsed, waypoint_wait_duration_);
+                               "⏳ Waiting at waypoint %zu: %.1f / %.1f s | error: N=%.1f E=%.1f D=%.1f | corr_vel: %.2f %.2f %.2f",
+                               current_waypoint_idx_, elapsed, waypoint_wait_duration_,
+                               pos_error.x(), pos_error.y(), pos_error.z(),
+                               correction_vel.x(), correction_vel.y(), correction_vel.z());
           return;
         }
       }
@@ -2301,7 +2332,12 @@ namespace los_guidance
           waypoint_waiting_ = true;
           waypoint_wait_duration_ = current_wp.param;
           waypoint_wait_start_ = std::chrono::steady_clock::now();
-          RCLCPP_INFO(this->get_logger(), "⏳ Waiting for %.1f seconds...", current_wp.param);
+          // Сохраняем NED позицию waypoint для удержания
+          waypoint_wait_target_ned_ = gpsToNed(current_wp.lat, current_wp.lon, 0.0,
+                                                ref_lat, ref_lon, ref_alt);
+          RCLCPP_INFO(this->get_logger(), "⏳ Waiting for %.1f seconds at NED: %.1f, %.1f, %.1f",
+                      current_wp.param,
+                      waypoint_wait_target_ned_.x(), waypoint_wait_target_ned_.y(), waypoint_wait_target_ned_.z());
         }
         else if (current_wp.action == "land")
         {
@@ -4061,6 +4097,7 @@ namespace los_guidance
       // Удалили ТЕКУЩУЮ точку — сбрасываем флаги ожидания/подъёма
       waypoint_waiting_ = false;
       waypoint_climbing_ = false;
+      waypoint_wait_target_ned_ = Eigen::Vector3d::Zero();
       RCLCPP_INFO(this->get_logger(), "🗑️ Current waypoint deleted — wait/climb flags reset");
 
       // Сбрасываем на начало (или на 0, если пусто)
@@ -4132,6 +4169,22 @@ namespace los_guidance
     {
       RCLCPP_WARN(this->get_logger(), "➕ waypoint_add: unknown action '%s' — must be wait/land/up", wp.action.c_str());
       return;
+    }
+
+    // Проверка максимального радиуса от стартовой точки (GeoFence)
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (start_gps_valid_)
+      {
+        double dist = haversineDist(start_lat_, start_lon_, wp.lat, wp.lon);
+        if (dist > config_.waypoint_max_radius_from_home_m)
+        {
+          RCLCPP_WARN(this->get_logger(),
+                      "➕ waypoint_add: waypoint (%.6f, %.6f) is %.0f m from start — exceeds max radius %.0f m. Rejected.",
+                      wp.lat, wp.lon, dist, config_.waypoint_max_radius_from_home_m);
+          return;
+        }
+      }
     }
 
     std::lock_guard<std::mutex> lock(state_mutex_);
