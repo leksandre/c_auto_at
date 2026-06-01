@@ -305,6 +305,7 @@ namespace los_guidance
     this->declare_parameter("commander.gps_waypoints", std::vector<std::string>{});
     this->declare_parameter("waypoint.arrival_tolerance_m", 30.0);
     this->declare_parameter("waypoint.speed_mps", 7.0);
+    this->declare_parameter("waypoint.gps_loss_timeout_s", 1800.0); // 30 минут
     this->declare_parameter("waypoint.max_radius_from_home_m", 40000.0);
 
     commander_enabled_ = this->get_parameter("commander.enable").as_bool();
@@ -4333,12 +4334,6 @@ namespace los_guidance
 
     this->declare_parameter("takeoff.visual_searching", false);
     this->declare_parameter("takeoff.visual_search_timeout_s", 300); // 5 минут по умолчанию
-
-    // Waypoint parameters
-    this->declare_parameter("waypoint.arrival_tolerance_m", 30.0);
-    this->declare_parameter("waypoint.speed_mps", 7.0);
-    this->declare_parameter("waypoint.gps_loss_timeout_s", 1800.0); // 30 минут
-    this->declare_parameter("waypoint.max_radius_from_home_m", 40000.0); // 20 км
 
     RCLCPP_DEBUG(this->get_logger(), "✓ All parameters declared successfully");
   }
