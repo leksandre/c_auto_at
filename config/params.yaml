@@ -1,0 +1,154 @@
+los_guidance_node:
+  ros__parameters:
+    attack:
+      max_approach_distance_m: 50.0  # 200.0
+    gps:
+      source: "uart"   # Меняйте на "uart", чтобы использовать внешний GPS
+    uart_gps:
+      enable: true       # Включить чтение внешнего GPS через UART
+      port: "/dev/ttyS1" # Путь к вашему USB-UART адаптеру
+      baudrate: 9600     # Стандартная скорость для большинства модулей (UBLOX и т.д.)
+    logging:
+      throttle_interval_ms: 136000
+    takeoff:
+      climb_rate_mps: -1.0  # 10 м/с
+      target_altitude_m: 100.0 
+      altitude_threshold_m: 1.5 
+      min_altitude_already_flying_m: 2.0 
+      min_cycles_for_already_flying: 120 
+      skip: false                    # Пропуск взлёта
+      visual_searching: true         # 🔍 Визуальный поиск после взлёта
+      visual_search_timeout_s: 300   # ⏰ 5 минут ожидания
+      timeout_s: 5 # 20 секунд для нормального взлёта
+    # === Tracker ===
+    camera:
+      # Камера
+      fx: 410.0
+      fy: 410.0
+      cx: 640.0
+      cy: 640.0
+      vertical_fov_deg: 60.0
+      
+      # Установка камеры
+      install:
+        roll_deg: 0.0
+        pitch_deg: -10.0
+        yaw_deg: 0.0
+      
+      # Фильтрация ⬇️ УВЕЛИЧЕНО для тяжёлого дрона
+      pixel_smooth_alpha: 0.7      # Увеличено для более резкой реакции
+      los_smooth_alpha: 0.3        # Увеличено для более резкой реакции
+      min_confidence: 0.4          # ↑ Было 0.5 (строже)
+    
+    # === Kalman Filter LOS ===
+    kalman:
+      los_process_noise_Q: 0.025   # Увеличено для более быстрой реакции на изменение
+      los_measurement_noise_R: 0.25 # Увеличено для более быстрой реакции на изменение
+      use_gyro_compensation: true  # ✅ ВКЛЮЧИТЬ для тяжёлого
+      enable_adaptive_noise: true  # ✅ ВКЛЮЧИТЬ
+      adaptive_Fmin_scale: 0.5
+      adaptive_max_scale: 15.0
+    
+    # === Наведение (Guidance) ===
+    guidance:
+      pn_gain_N: 3.5               # Увеличено для более агрессивного наведения (было 2.4)
+      max_tilt_deg: 45.0           # Увеличено до максимального (было 35.0)
+      min_tilt_deg: 8.0            # Без изменений
+      enable_PI_control: true      # ✅ ВКЛЮЧИТЬ для тяжёлого
+      enable_acceleration_parallel: true
+      top_attack_mode: true
+      
+      # 🆕 Компенсация ЦТ (если сместился)
+      cg_trim_pitch_deg: 2.5       # Настроить экспериментально
+      enable_cg_compensation: true
+      
+      # 🆕 Коэффициенты для тяжёлого дрона (вынесены из хардкода)
+      mass:
+        mass_ratio: 1.61           # = mass_new / mass_old (2519г / 1562г)
+        accel_scale: 0.62          # = 1/mass_ratio — масштаб ускорений
+        heavy_drone_factor: 0.62   # Множитель ограничений ускорения в VehicleController
+    
+    # === Скорость (Vc estimation) ===
+    velocity:
+      min_vc_mps: 1.2              # Без изменений
+      max_vc_mps: 25.0             # Значительно увеличено (было 12.5)
+      vc_alpha_smooth: 0.25        # Уменьшено для более быстрой реакции на изменение скорости
+    
+    # === PI контроллер LOS ===
+    los_pi:
+      y:
+        kp: 3.5                    # Увеличено (было 2.4)
+        ki: 0.012                  # Увеличено (было 0.008)
+        ff_enable: true
+        ff_gain: 8.0               # Значительно увеличено (было 5.5)
+        ff_limit: 3.5              # Увеличено (было 2.4)
+        err_ff_limit: 0.15
+        int_limit: 3.5             # Увеличено (было 2.4)
+      z:
+        kp: 3.5                    # Увеличено (было 2.4)
+        ki: 0.012                  # Увеличено (было 0.008)
+        ff_enable: true
+        ff_gain: 8.0               # Значительно увеличено (было 5.5)
+        ff_limit: 3.5              # Увеличено (было 2.4)
+        err_ff_limit: 0.15
+        int_limit: 5.5             # Увеличено (было 4.0)
+    
+    # === Intercept алгоритм ===
+    intercept:
+      kp: 3.5                      # Увеличено (было 2.4)
+      ki: 0.012                    # Увеличено (было 0.008)
+      kd: 0.012                    # Увеличено (было 0.008)
+      int_limit: 1.5               # Увеличено (было 0.8)
+      z_kp: 5.5                    # Увеличено (было 4.0)
+      acc_alpha: 0.25              # Увеличено (было 0.16)
+    
+    # === Ограничения ускорений ===
+    acceleration:
+      max_lateral_mps2: 7.72       # ↓ Было 3.0 (×2.5) увеличено для большей мощности
+      max_vertical_up_mps2: -10.2   # ↓ Было -5.0 (×2.0) увеличено для большей мощности
+      max_vertical_down_mps2: 10.2  # ↓ Было 5.0 (×2.0) увеличено для большей мощности
+      max_horizontal_mps2: 24.88    # ↓ Было 12.0 (×2.0) увеличено для большей мощности
+      ax_rate_limit_mps3: 5.24     # ↓ Было 1.0 (×5.0) увеличено для более быстрого изменения
+      apn_alpha: 0.26              # ↑ Было 0.1 (×1.6)
+      
+      parallel:
+        enable: true
+        gain: 0.3                # Резко увеличено для мощного старта атаки (было 0.062)
+        alpha: 0.3                 # Резко увеличено для быстрого набора ускорения (было 0.16)
+        max_mps2: 5.0             # Резко увеличено для мощного старта атаки (было 1.24)
+    
+    # === ADRC ===
+    adrc:
+      td_r: 800.0                  # ↓ Было 1000.0 (плавнее)
+      td_h: 0.016                  # ↑ Было 0.01 (медленнее)
+      td_n: 2
+    
+    # === Синхронизация ===
+    sync:
+      buffer_size: 160             # ↑ Было 100 (×1.6)
+      retention_us: 320000         # ↑ Было 200000 (×1.6)
+      debug: true
+    
+    # === Waypoint tracking ===
+    waypoint:
+      arrival_tolerance_m: 30.0    # Допуск прибытия в точку маршрута (м)
+      speed_mps: 7.0               # 🆕 Скорость движения между waypoint (м/с)
+      gps_loss_timeout_s: 600.0   # 🆕 Таймаут потери GPS перед посадкой (с), 600 = 10 мин
+      max_radius_from_home_m: 50000.0  # 🆕 Максимальное расстояние от стартовой точки (м), 20 км
+
+    # === Таймеры ===
+    timer:
+      update_ms: 25                # ↑ Было 20 (тяжёлый медленнее)
+
+    commander:
+      enable: true
+      port: 11472
+      targets: [ "192.168.14.169", "192.168.14.175", "192.168.14.179"] # если лист пустой... какая логика?
+      gps_waypoints: ["51.992795,5.853739,wait,300", "55.75393,55.75438,wait,300", "55.75450,55.75361,wait,300", "55.75313,55.75393,wait,300"]
+      target_port: 11472  # Порт, на котором цели слушают запросы SHOWGPS //11471 было
+    
+    # === Clamp Modifications ===
+    clamp_modifications:
+      scale_x: 3.0
+      scale_y: 1.0
+      scale_z: 0.4
