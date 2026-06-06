@@ -149,6 +149,6 @@ los_guidance_node:
     
     # === Clamp Modifications ===
     clamp_modifications:
-      scale_x: 3.0
-      scale_y: 1.0
-      scale_z: 0.4
+      scale_x: 1.5
+      scale_y: 0.01
+      scale_z: 0.04

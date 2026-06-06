@@ -1157,7 +1157,7 @@ namespace los_guidance
     control_sub_opts.callback_group = control_callback_group_;
 
 
-
+     // fixForGAzebo
     subscription_odom_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
     "fmu/out/vehicle_odometry",
     qos,
@@ -1420,7 +1420,8 @@ namespace los_guidance
         pitch,
         yaw,
         roll); // ← полная трансформация body→nav
-    Eigen::Vector3d acc_cmd = output.acceleration_cmd;
+    //Eigen::Vector3d acc_cmd = output.acceleration_cmd;
+    Eigen::Vector3d acc_cmd = output.acceleration_frd;
 
     // === 🪵 Лог команды ускорения ===
     if (config_.debug)
@@ -1508,7 +1509,7 @@ namespace los_guidance
 
 
 
-
+     // fixForGAzebo
     //добавил для понимания
     auto tracker_result_ = *msg;
 
@@ -1760,6 +1761,7 @@ namespace los_guidance
   }
 
 
+   // fixForGAzebo
 void Node::odomCallback(px4_msgs::msg::VehicleOdometry::SharedPtr msg) {
     // Данные гироскопа здесь:
     double wx = msg->angular_velocity[0];

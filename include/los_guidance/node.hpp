@@ -327,7 +327,7 @@ namespace los_guidance
      */
     void vehicleStatusCallback(px4_msgs::msg::VehicleStatus::SharedPtr msg);
 
-    void odomCallback(px4_msgs::msg::VehicleOdometry::SharedPtr msg);
+    void odomCallback(px4_msgs::msg::VehicleOdometry::SharedPtr msg); // fixForGAzebo
 
     /**
      * @brief Выполняет последовательность взлета (Takeoff)
@@ -430,7 +430,7 @@ namespace los_guidance
     rclcpp::Subscription<vision_msgs::msg::Detection2D>::SharedPtr track_bbox_sub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleAttitude>::SharedPtr vehicle_attitude_sub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleAngularVelocity>::SharedPtr vehicle_angular_velocity_sub_;
-    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr subscription_odom_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr subscription_odom_;  // fixForGAzebo
     rclcpp::Subscription<std_msgs::msg::Header>::SharedPtr heartbeat_sub_;  ///< AI heartbeat
 
     // === ROS2 Publishers ===

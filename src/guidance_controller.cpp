@@ -489,14 +489,37 @@ namespace los_guidance
 
     // Симметричные пределы для X и Y (можно двигаться в обе стороны)
     double hor_limit = config_.max_hor_acc * mass_factor;
-    acc_clamped.x() = clamp_(acc.x() * config_.clamp_modifications_scale_x, -hor_limit, hor_limit);
-    acc_clamped.y() = clamp_(acc.y() * config_.clamp_modifications_scale_y, -hor_limit, hor_limit);
+
+    double acc_x_scaled = acc.x() * config_.clamp_modifications_scale_x;
+    double acc_y_scaled = acc.y() * config_.clamp_modifications_scale_y;
+    double acc_z_scaled = acc.z() * config_.clamp_modifications_scale_z;
+
+    acc_clamped.x() = clamp_(acc_x_scaled, 0, hor_limit);
+    acc_clamped.y() = clamp_(acc_y_scaled, -hor_limit, hor_limit);
     
+    double up_limit   = config_.max_up_acc * mass_factor;
+    double down_limit = config_.max_down_acc * mass_factor;
     // Z: вертикальные пределы (NED: up = negative, down = positive)
-    acc_clamped.z() = clamp_(
-        acc.z() * config_.clamp_modifications_scale_z,
-        config_.max_up_acc * mass_factor,
-        config_.max_down_acc * mass_factor);
+    acc_clamped.z() = clamp_(acc_z_scaled, up_limit, down_limit);
+
+    {
+      static auto clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
+      RCLCPP_INFO_THROTTLE(rclcpp::get_logger("guidance_ctrl"), *clock, 2500,
+        "🔧 clampAcceleration_:"
+        "  in=[%.2f, %.2f, %.2f]"
+        "  mass_factor=%.2f  scale=[%.2f, %.2f, %.2f]"
+        "  scaled=[%.2f, %.2f, %.2f]"
+        "  limits: hor=±%.1f  up=%.1f  down=%.1f"
+        "  out=[%.2f, %.2f, %.2f]",
+        acc.x(), acc.y(), acc.z(),
+        mass_factor,
+        config_.clamp_modifications_scale_x,
+        config_.clamp_modifications_scale_y,
+        config_.clamp_modifications_scale_z,
+        acc_x_scaled, acc_y_scaled, acc_z_scaled,
+        hor_limit, up_limit, down_limit,
+        acc_clamped.x(), acc_clamped.y(), acc_clamped.z());
+    }
 
     return acc_clamped;
   }
