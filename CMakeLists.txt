@@ -47,10 +47,11 @@ set(project_SOURCE_FILES
   src/target_tracker.cpp
   src/guidance_controller.cpp
   src/los_estimator.cpp
-  src/vehicle_controller.cpp    
+  src/vehicle_controller.cpp
   src/sensor_sync.cpp
-  src/commander.cpp 
-  src/gps_parser.cpp 
+  src/commander.cpp
+  src/gps_parser.cpp
+  src/synthetic_data_generator.cpp
 )
 
 # Executable target

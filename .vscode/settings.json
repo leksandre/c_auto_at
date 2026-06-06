@@ -52,6 +52,7 @@
         "cstring": "cpp",
         "cwctype": "cpp",
         "iterator": "cpp",
-        "fstream": "cpp"
+        "fstream": "cpp",
+        "iomanip": "cpp"
     }
 }

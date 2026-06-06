@@ -59,6 +59,7 @@
 #include "los_guidance/sensor_sync.hpp"
 #include "los_guidance/adrc.hpp"
 #include "los_guidance/commander.hpp"
+#include "los_guidance/synthetic_data_generator.hpp"
 
 
 #include "los_guidance/gps_parser.hpp"
@@ -638,6 +639,16 @@ bool update_acc_setpoint_{false};
 
     // 🆕 Обработка прерывания взлёта
     void handleTakeoffAbort();
+
+    // === Synthetic Data Generation ===
+    /**
+     * @brief Запуск генерации синтетических данных для обучения MLP
+     * @param num_samples Количество сэмплов (по умолчанию 100000)
+     * @param output_path Путь к CSV файлу
+     * @return true если успешно
+     */
+    bool generateSyntheticData(int num_samples = 100000,
+                               const std::string& output_path = "/simulation_ws/data/synthetic_guidance_data.csv");
   };
 
 } // namespace los_guidance

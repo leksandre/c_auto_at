@@ -54,6 +54,18 @@ namespace los_guidance
     RCLCPP_INFO(this->get_logger(), "Post-constructing controllers...");
     initializeControllers(); // ✅ Теперь shared_from_this() работает
 
+    // === Synthetic Data Generation (Вариант C: отдельный поток при старте) ===
+    // Поставьте false чтобы отключить генерацию при старте
+    if (false) {
+      RCLCPP_INFO(this->get_logger(), "📊 Scheduling synthetic data generation in background thread...");
+      std::thread([this]() {
+        std::this_thread::sleep_for(std::chrono::seconds(2)); // Ждём инициализации всех подписчиков
+        this->generateSyntheticData(100000, "/simulation_ws/data/synthetic_guidance_data.csv");
+      }).detach();
+    } else {
+      RCLCPP_INFO(this->get_logger(), "📊 Synthetic data generation disabled at startup");
+    }
+
     // В функции Node::postConstruct() или в конце конструктора Node():
 
     // 1. Загрузка параметров UART GPS
@@ -4445,6 +4457,55 @@ void Node::softReset()
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     emergency_stop_ = false;
     RCLCPP_INFO(this->get_logger(), "✅ SOFT RESET complete. System IDLE.");
+}
+
+// ============================================================================
+// Synthetic Data Generation
+// ============================================================================
+
+bool Node::generateSyntheticData(int num_samples, const std::string& output_path)
+{
+    if (!guidance_ctrl_) {
+        RCLCPP_ERROR(this->get_logger(), "❌ guidance_ctrl_ not initialized");
+        return false;
+    }
+
+    RCLCPP_INFO(this->get_logger(), "🚀 Starting synthetic data generation (%d samples)...", num_samples);
+
+    // Настройка конфигурации генератора
+    GeneratorConfig gen_config;
+    gen_config.num_samples = num_samples;
+    gen_config.lambda_min = -5.0;
+    gen_config.lambda_max = 5.0;
+    gen_config.pitch_min = -1.0;
+    gen_config.pitch_max = 1.0;
+    gen_config.yaw_min = -M_PI;
+    gen_config.yaw_max = M_PI;
+    gen_config.roll_min = -0.5;
+    gen_config.roll_max = 0.5;
+
+    SyntheticDataGenerator gen(gen_config);
+
+    bool success = gen.generateDatasetWithProgress(
+        guidance_ctrl_.get(),
+        output_path,
+        [this](int current, int total) {
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                "📊 Progress: %d / %d (%.1f%%)",
+                current, total, 100.0 * current / total);
+        }
+    );
+
+    if (success) {
+        auto stats = gen.getLastStats();
+        RCLCPP_INFO(this->get_logger(),
+            "✅ Generation complete: %d valid samples in %.2fs (skipped %d)",
+            stats.valid_samples, stats.duration_sec, stats.skipped_samples);
+    } else {
+        RCLCPP_ERROR(this->get_logger(), "❌ Generation failed");
+    }
+
+    return success;
 }
 
 
