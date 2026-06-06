@@ -78,9 +78,9 @@ void SyntheticDataGenerator::writeRow(std::ofstream& file,
          << u_los.x() << "," << u_los.y() << "," << u_los.z() << ","
          << lambda.x() << "," << lambda.y() << "," << lambda.z() << ","
          << pitch << "," << yaw << "," << roll << ","
-         << output.acceleration_cmd.x() << ","
-         << output.acceleration_cmd.y() << ","
-         << output.acceleration_cmd.z() << "\n";
+         << output.acceleration_frd.x() << ","
+         << output.acceleration_frd.y() << ","
+         << output.acceleration_frd.z() << "\n";
 }
 
 bool SyntheticDataGenerator::generateDataset(GuidanceController* guidance_ctrl,
