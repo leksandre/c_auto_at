@@ -307,6 +307,7 @@ namespace los_guidance
     this->declare_parameter("waypoint.speed_mps", 7.0);
     this->declare_parameter("waypoint.gps_loss_timeout_s", 1800.0); // 30 минут
     this->declare_parameter("waypoint.max_radius_from_home_m", 40000.0);
+    this->declare_parameter("waypoint.cruise_altitude_m", 100.0);
 
     commander_enabled_ = this->get_parameter("commander.enable").as_bool();
     commander_port_ = static_cast<int>(this->get_parameter("commander.port").as_int());
@@ -316,6 +317,7 @@ namespace los_guidance
     waypoint_speed_ = this->get_parameter("waypoint.speed_mps").as_double();
     config_.waypoint_gps_loss_timeout_s = this->get_parameter("waypoint.gps_loss_timeout_s").as_double();
     config_.waypoint_max_radius_from_home_m = this->get_parameter("waypoint.max_radius_from_home_m").as_double();
+    config_.waypoint_cruise_altitude_m = this->get_parameter("waypoint.cruise_altitude_m").as_double();
 
     // === Загрузка GPS waypoints ===
     auto wp_strings = this->get_parameter("commander.gps_waypoints").as_string_array();
@@ -2303,8 +2305,8 @@ namespace los_guidance
         current_wp = gps_waypoints_[wp_idx];
       }
 
-      // Конвертируем waypoint в NED
-      Eigen::Vector3d wp_ned = gpsToNed(current_wp.lat, current_wp.lon, 0.0, ref_lat, ref_lon, ref_alt);
+      // Конвертируем waypoint в NED (на крейсерской высоте)
+      Eigen::Vector3d wp_ned = gpsToNed(current_wp.lat, current_wp.lon, config_.waypoint_cruise_altitude_m, ref_lat, ref_lon, ref_alt);
 
       // Вычисляем расстояние до waypoint
       double dist_to_wp = haversineDist(local_drone_gps.lat, local_drone_gps.lon, current_wp.lat, current_wp.lon);
@@ -2333,8 +2335,8 @@ namespace los_guidance
           waypoint_waiting_ = true;
           waypoint_wait_duration_ = current_wp.param;
           waypoint_wait_start_ = std::chrono::steady_clock::now();
-          // Сохраняем NED позицию waypoint для удержания
-          waypoint_wait_target_ned_ = gpsToNed(current_wp.lat, current_wp.lon, 0.0,
+          // Сохраняем NED позицию waypoint для удержания (на крейсерской высоте)
+          waypoint_wait_target_ned_ = gpsToNed(current_wp.lat, current_wp.lon, config_.waypoint_cruise_altitude_m,
                                                 ref_lat, ref_lon, ref_alt);
           RCLCPP_INFO(this->get_logger(), "⏳ Waiting for %.1f seconds at NED: %.1f, %.1f, %.1f",
                       current_wp.param,
@@ -2378,7 +2380,7 @@ namespace los_guidance
           if (current_waypoint_idx_ < gps_waypoints_.size())
           {
             const auto &next_wp = gps_waypoints_[current_waypoint_idx_];
-            target_gps_ = {next_wp.lat, next_wp.lon, 0.0, 0, true};
+            target_gps_ = {next_wp.lat, next_wp.lon, config_.waypoint_cruise_altitude_m, 0, true};
           }
         }
 
@@ -4006,9 +4008,9 @@ namespace los_guidance
           if (dist > config_.waypoint_max_radius_from_home_m)
           {
             RCLCPP_ERROR(this->get_logger(),
-                         "❌ GPS_WAYPOINT: Waypoint %zu (%.6f, %.6f) is %.0f m from start — exceeds max radius %.0f m. Aborting.",
+                         "❌ GPS_WAYPOINT: 2 Waypoint %zu (%.6f, %.6f) is %.0f m from start — exceeds max radius %.0f m. Aborting.",
                          i, wp.lat, wp.lon, dist, config_.waypoint_max_radius_from_home_m);
-            return;
+            //return; //tmp_check distatce off
           }
         }
         RCLCPP_INFO(this->get_logger(), "✅ GPS_WAYPOINT: All waypoints within max radius (%.0f m)", config_.waypoint_max_radius_from_home_m);
@@ -4057,7 +4059,7 @@ namespace los_guidance
 
       // Устанавливаем target_gps_ на первый waypoint
       const auto &wp = gps_waypoints_[0];
-      target_gps_ = {wp.lat, wp.lon, 0.0, 0, true};
+      target_gps_ = {wp.lat, wp.lon, config_.waypoint_cruise_altitude_m, 0, true};
       RCLCPP_INFO(this->get_logger(), "🗺️ First waypoint target: lon=%.6f, lat=%.6f, action=%s, param=%.1f",
                   wp.lon, wp.lat, wp.action.c_str(), wp.param);
 
@@ -4181,9 +4183,9 @@ namespace los_guidance
         if (dist > config_.waypoint_max_radius_from_home_m)
         {
           RCLCPP_WARN(this->get_logger(),
-                      "➕ waypoint_add: waypoint (%.6f, %.6f) is %.0f m from start — exceeds max radius %.0f m. Rejected.",
+                      "➕ 1 waypoint_add: waypoint (%.6f, %.6f) is %.0f m from start — exceeds max radius %.0f m. Rejected.",
                       wp.lat, wp.lon, dist, config_.waypoint_max_radius_from_home_m);
-          return;
+          return; //tmp_check distatce off
         }
       }
     }
@@ -4233,7 +4235,7 @@ namespace los_guidance
     // Переходим к следующему waypoint
     current_waypoint_idx_++;
     const auto &wp = gps_waypoints_[current_waypoint_idx_];
-    target_gps_ = {wp.lat, wp.lon, 0.0, 0, true};
+    target_gps_ = {wp.lat, wp.lon, config_.waypoint_cruise_altitude_m, 0, true};
 
     RCLCPP_INFO(this->get_logger(), "⏭️ Skipped to waypoint %zu/%zu: lon=%.6f, lat=%.6f, action=%s, param=%.1f",
                 current_waypoint_idx_, gps_waypoints_.size() - 1,

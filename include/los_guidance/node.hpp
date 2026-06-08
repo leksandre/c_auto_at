@@ -175,6 +175,7 @@ namespace los_guidance
     double waypoint_arrival_tolerance_m{30.0};  ///< Допуск прибытия в точку маршрута (м)
     double waypoint_gps_loss_timeout_s{1800.0}; ///< Таймаут потери GPS перед посадкой (с), 1800 = 30 мин
     double waypoint_max_radius_from_home_m{20000.0}; ///< Максимальное расстояние от стартовой точки (м), 20 км
+    double waypoint_cruise_altitude_m{100.0};   ///< Крейсерская высота полёта по маршруту (м)
 
     // Параметры ручного управления
     int manual_control_update_rate_hz{20};
