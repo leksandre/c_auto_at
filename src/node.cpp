@@ -1320,6 +1320,10 @@ namespace los_guidance
 
   void Node::uartGpsCallback()
   {
+    // Не пишем в drone_gps_, если источником выбран PX4
+    if (!use_uart_gps_)
+      return;
+
     GpsData uart_data = uart_gps_parser_.getData();
 
     if (uart_data.is_valid)
