@@ -40,6 +40,11 @@ namespace los_guidance
     using WaypointListCallback = std::function<std::string()>; // 🆕 waypoint_list — returns JSON
     using WaypointSpeedCallback = std::function<void(double)>;  // 🆕 waypoint_speed — set speed
 
+    // 🆕 Self-destruct callbacks
+    using BamperModeCallback = std::function<void(bool)>;       // set_bamper true/false
+    using SelfDestructModeCallback = std::function<void(bool)>; // set_self_destruct_mode true/false
+    using HeartbeatCallback = std::function<void()>;            // ping/heartbeat from GCS
+
     explicit Commander(int port, AttackCallback attack_cb, AutoModeCallback auto_cb,
                        GpsQueryCallback gps_cb, HomeCallback home_cb, rclcpp::Logger logger,
                        ArmCallback arm_cb = nullptr,                  // 🆕
@@ -56,7 +61,10 @@ namespace los_guidance
                        WaypointAddCallback waypoint_add_cb = nullptr,      // 🆕 waypoint_add
                        WaypointSkipCallback waypoint_skip_cb = nullptr,   // 🆕 waypoint_skip
                        WaypointListCallback waypoint_list_cb = nullptr,  // 🆕 waypoint_list
-                       WaypointSpeedCallback waypoint_speed_cb = nullptr); // 🆕 waypoint_speed
+                       WaypointSpeedCallback waypoint_speed_cb = nullptr, // 🆕 waypoint_speed
+                       BamperModeCallback bamper_cb = nullptr,            // 🆕 set_bamper
+                       SelfDestructModeCallback self_destruct_cb = nullptr, // 🆕 set_self_destruct_mode
+                       HeartbeatCallback heartbeat_cb = nullptr);           // 🆕 ping/heartbeat
 
     ~Commander();
 
@@ -93,6 +101,10 @@ namespace los_guidance
     WaypointSkipCallback waypoint_skip_callback_;     // 🆕 waypoint_skip
     WaypointListCallback waypoint_list_callback_;     // 🆕 waypoint_list
     WaypointSpeedCallback waypoint_speed_callback_;   // 🆕 waypoint_speed
+    // 🆕 Self-destruct callbacks
+    BamperModeCallback bamper_callback_;
+    SelfDestructModeCallback self_destruct_callback_;
+    HeartbeatCallback heartbeat_callback_;
     rclcpp::Logger logger_;
     std::thread listen_thread_;
     std::atomic<bool> running_{false};

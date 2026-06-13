@@ -18,6 +18,7 @@
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
+#include <px4_msgs/msg/actuator_servos.hpp>
 #include <Eigen/Dense>
 #include <mutex>
 #include <memory>
@@ -293,6 +294,13 @@ namespace los_guidance
     void setDebugLogging(bool enable);
 
     /**
+     * @brief Публикация сигнала подрыва (ActuatorServos)
+     * @param active true = 1.0f (сигнал), false = 0.0f (сброс)
+     * @note control[0] = active ? 1.0f : 0.0f — маппится на SERVO/GPIO в PX4
+     */
+    void publishAttackServo(bool active);
+
+    /**
      * @brief Конвертация FlightMode в строку
      * @param mode Режим полёта
      * @return Строковое представление режима
@@ -308,6 +316,7 @@ namespace los_guidance
     rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr cmd_pub_;
     rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_pub_;
     rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr traj_pub_;
+    rclcpp::Publisher<px4_msgs::msg::ActuatorServos>::SharedPtr actuator_servos_pub_;
 
     // === Состояние ===
     VehicleStatusInfo status_;

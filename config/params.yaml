@@ -3,11 +3,11 @@ los_guidance_node:
     attack:
       max_approach_distance_m: 50.0  # 200.0
     gps:
-      source: "px4"   # "px4" — встроенный GPS PX4, "uart" — внешний GPS через UART
+      source: "uart"   # "px4" — встроенный GPS PX4, "uart" — внешний GPS через UART
     uart_gps:
-      enable: false      # Включить чтение внешнего GPS через UART
+      enable: true      # Включить чтение внешнего GPS через UART
       port: "/dev/ttyS1" # Путь к вашему USB-UART адаптеру
-      baudrate: 9600     # Стандартная скорость для большинства модулей (UBLOX и т.д.)
+      baudrate: 9600     # Стандартная скорость для большинства модулей (UBLOX и т.д.) 9600//115200
     logging:
       throttle_interval_ms: 136000
     takeoff:
@@ -135,7 +135,7 @@ los_guidance_node:
       speed_mps: 7.0               # 🆕 Скорость движения между waypoint (м/с)
       gps_loss_timeout_s: 600.0   # 🆕 Таймаут потери GPS перед посадкой (с), 600 = 10 мин
       max_radius_from_home_m: 50000.0  # 🆕 Максимальное расстояние от стартовой точки (м), 20 км
-      cruise_altitude_m: 100.0     # 🆕 Крейсерская высота полёта по маршруту (м)
+      cruise_altitude_m: 300.0     # 🆕 Крейсерская высота полёта по маршруту (м)
 
     # === Таймеры ===
     timer:
@@ -148,6 +148,15 @@ los_guidance_node:
       gps_waypoints: ["51.95368,55.85925,wait,300", "51.96375,55.86591,wait,300", "51.95392,55.86599,wait,300", "51.94570,55.86162,wait,300"]
       target_port: 11472  # Порт, на котором цели слушают запросы SHOWGPS //11471 было
     
+    # === Self-destruct / Attack Signal ===
+    self_destruct:
+      enabled: false                    # Включить механизм самоликвидации
+      altitude_threshold_m: 150.0       # Порог высоты для выдачи сигнала (м)
+      climb_vel_mps: -4.0               # Скорость набора высоты (NED, м/с, отрицательная = вверх)
+      climb_acc_mps2: -0.5              # Ускорение набора высоты (NED, м/с²)
+      link_loss_timeout_ms: 5000        # Таймаут потери связи (мс)
+      dry_run: false                    # Dry-run: логировать, но не выдавать сигнал
+
     # === Clamp Modifications ===
     clamp_modifications:
       scale_x: 3.0

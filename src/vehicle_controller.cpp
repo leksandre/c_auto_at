@@ -539,6 +539,9 @@ namespace los_guidance
     traj_pub_ = node_->create_publisher<px4_msgs::msg::TrajectorySetpoint>(
         "fmu/in/trajectory_setpoint", 10);
 
+    actuator_servos_pub_ = node_->create_publisher<px4_msgs::msg::ActuatorServos>(
+        "fmu/in/actuator_servos", 10);
+
     if (config_.debug_logging)
     {
       RCLCPP_INFO(node_->get_logger(), "VehicleController publishers created");
@@ -704,6 +707,20 @@ namespace los_guidance
 
     default:
       return FlightMode::OTHERS;
+    }
+  }
+
+  void VehicleController::publishAttackServo(bool active)
+  {
+    px4_msgs::msg::ActuatorServos msg{};
+    msg.timestamp = getCurrentTimestamp_();
+    msg.control.fill(std::numeric_limits<float>::quiet_NaN());
+    msg.control[0] = active ? 1.0f : 0.0f;
+    actuator_servos_pub_->publish(msg);
+
+    if (config_.debug_logging)
+    {
+      RCLCPP_DEBUG(node_->get_logger(), "💥 AttackServo: control[0]=%.1f", msg.control[0]);
     }
   }
 

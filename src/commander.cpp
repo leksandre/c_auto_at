@@ -22,7 +22,10 @@ namespace los_guidance
     WaypointAddCallback waypoint_add_cb,
     WaypointSkipCallback waypoint_skip_cb,
     WaypointListCallback waypoint_list_cb,
-    WaypointSpeedCallback waypoint_speed_cb)
+    WaypointSpeedCallback waypoint_speed_cb,
+    BamperModeCallback bamper_cb,
+    SelfDestructModeCallback self_destruct_cb,
+    HeartbeatCallback heartbeat_cb)
     : port_(port), attack_callback_(std::move(attack_cb)),
       auto_mode_callback_(std::move(auto_cb)), gps_query_callback_(std::move(gps_cb)),
       home_callback_(std::move(home_cb)), arm_callback_(std::move(arm_cb)),
@@ -37,6 +40,9 @@ namespace los_guidance
       waypoint_skip_callback_(std::move(waypoint_skip_cb)),
       waypoint_list_callback_(std::move(waypoint_list_cb)),
       waypoint_speed_callback_(std::move(waypoint_speed_cb)),
+      bamper_callback_(std::move(bamper_cb)),
+      self_destruct_callback_(std::move(self_destruct_cb)),
+      heartbeat_callback_(std::move(heartbeat_cb)),
       logger_(std::move(logger)) {}
 
   Commander::~Commander() { stop(); }
@@ -579,6 +585,71 @@ namespace los_guidance
 
 
 
+
+    // 🆕 Команда ping/heartbeat
+    if (data.find("\"ping\"") != std::string::npos || data.find("\"heartbeat\"") != std::string::npos)
+    {
+      if (heartbeat_callback_)
+        heartbeat_callback_();
+      sendResponse(client_fd, "{\"status\":\"success\",\"command\":\"PONG\"}\n");
+      return;
+    }
+
+    // 🆕 Команда set_bamper
+    if (data.find("\"set_bamper\"") != std::string::npos)
+    {
+      bool bamper_val = false;
+      size_t key_pos = data.find("\"set_bamper\"");
+      size_t colon_pos = data.find(':', key_pos);
+      if (colon_pos != std::string::npos)
+      {
+        std::string val = data.substr(colon_pos + 1);
+        val.erase(0, val.find_first_not_of(" \t\r\n"));
+        if (val.substr(0, 4) == "true" || val.substr(0, 1) == "1")
+          bamper_val = true;
+        else if (val.substr(0, 5) == "false" || val.substr(0, 1) == "0")
+          bamper_val = false;
+        else {
+          sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"SET_BAMPER\",\"message\":\"Invalid value, use true/false\"}\n");
+          return;
+        }
+      }
+
+      RCLCPP_INFO(logger_, "💣 Received command: set_bamper = %s", bamper_val ? "true" : "false");
+      if (bamper_callback_)
+        bamper_callback_(bamper_val);
+      sendResponse(client_fd, bamper_val ? "{\"status\":\"success\",\"command\":\"SET_BAMPER\",\"data\":{\"bamper\":true}}\n"
+                                         : "{\"status\":\"success\",\"command\":\"SET_BAMPER\",\"data\":{\"bamper\":false}}\n");
+      return;
+    }
+
+    // 🆕 Команда set_self_destruct_mode
+    if (data.find("\"set_self_destruct_mode\"") != std::string::npos)
+    {
+      bool sd_val = false;
+      size_t key_pos = data.find("\"set_self_destruct_mode\"");
+      size_t colon_pos = data.find(':', key_pos);
+      if (colon_pos != std::string::npos)
+      {
+        std::string val = data.substr(colon_pos + 1);
+        val.erase(0, val.find_first_not_of(" \t\r\n"));
+        if (val.substr(0, 4) == "true" || val.substr(0, 1) == "1")
+          sd_val = true;
+        else if (val.substr(0, 5) == "false" || val.substr(0, 1) == "0")
+          sd_val = false;
+        else {
+          sendResponse(client_fd, "{\"status\":\"error\",\"command\":\"SET_SELF_DESTRUCT_MODE\",\"message\":\"Invalid value, use true/false\"}\n");
+          return;
+        }
+      }
+
+      RCLCPP_INFO(logger_, "☠️ Received command: set_self_destruct_mode = %s", sd_val ? "ARMED" : "DISARMED");
+      if (self_destruct_callback_)
+        self_destruct_callback_(sd_val);
+      sendResponse(client_fd, sd_val ? "{\"status\":\"success\",\"command\":\"SET_SELF_DESTRUCT_MODE\",\"data\":{\"armed\":true}}\n"
+                                     : "{\"status\":\"success\",\"command\":\"SET_SELF_DESTRUCT_MODE\",\"data\":{\"armed\":false}}\n");
+      return;
+    }
 
     // 3. Обычная команда атаки
     bool attack_cmd = false;

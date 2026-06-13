@@ -191,9 +191,17 @@ namespace los_guidance
     
 
         // === Параметры масштабирования ускорения (clamp) ===
-    double clamp_modifications_scale_x{1.0};           // Множитель масштабирования для X оси
-    double clamp_modifications_scale_y{1.0};           // Множитель масштабирования для Y оси
-    double clamp_modifications_scale_z{1.0};           // Множитель масштабирования для Z оси
+        double clamp_modifications_scale_x{1.0};           // Множитель масштабирования для X оси
+        double clamp_modifications_scale_y{1.0};           // Множитель масштабирования для Y оси
+        double clamp_modifications_scale_z{1.0};           // Множитель масштабирования для Z оси
+    
+        // === Self-destruct / Attack Signal ===
+        bool self_destruct_enabled{false};                  ///< Разрешить самоликвидацию
+        double self_destruct_altitude_threshold_m{150.0};   ///< Порог высоты для сигнала (м)
+        double self_destruct_climb_vel_mps{-4.0};           ///< Скорость набора высоты (NED, м/с)
+        double self_destruct_climb_acc_mps2{-0.5};          ///< Ускорение набора высоты (NED, м/с²)
+        int self_destruct_link_loss_timeout_ms{5000};       ///< Таймаут потери связи (мс)
+        bool self_destruct_dry_run{false};                  ///< Dry-run: логировать, но не выдавать сигнал
     
 
 
@@ -460,6 +468,14 @@ namespace los_guidance
     bool attack_enabled_{false};      ///< Авто-атака включена
     bool start_attack_{false};        ///< Сигнал начала атаки
     std::atomic<bool> attack_ready_{false}; ///< Система готова к атаке (lock-free)
+
+    // === Self-destruct state ===
+    bool self_destruct_armed_{false};                 ///< Режим самоликвидации активирован (через TCP)
+    bool bamper_mode_{false};                         ///< true = подрыв, false = возврат при потере связи
+    bool self_destruct_active_{false};                ///< Самоликвидация выполняется (climb + signal)
+    bool attack_signal_sent_{false};                  ///< Сигнал уже отправлен (чтобы не повторять)
+    std::chrono::steady_clock::time_point last_heartbeat_time_; ///< Время последнего heartbeat от GCS
+    bool heartbeat_received_{false};                  ///< Хотя бы один heartbeat был получен
 // std::atomic<double> last_los_cam_y_{0.0};  // 🆕
 std::atomic<double> last_los_cam_y_{0.0};  // 🆕
 bool update_acc_setpoint_{false}; 

@@ -292,9 +292,21 @@ namespace los_guidance
     guidance_config_.clamp_modifications_scale_x = this->get_parameter("clamp_modifications.scale_x").as_double();
     guidance_config_.clamp_modifications_scale_y = this->get_parameter("clamp_modifications.scale_y").as_double();
     guidance_config_.clamp_modifications_scale_z = this->get_parameter("clamp_modifications.scale_z").as_double();
-    
-    
-    
+
+    // === Self-destruct parameters ===
+    this->declare_parameter("self_destruct.enabled", false);
+    this->declare_parameter("self_destruct.altitude_threshold_m", 150.0);
+    this->declare_parameter("self_destruct.climb_vel_mps", -4.0);
+    this->declare_parameter("self_destruct.climb_acc_mps2", -0.5);
+    this->declare_parameter("self_destruct.link_loss_timeout_ms", 5000);
+    this->declare_parameter("self_destruct.dry_run", false);
+
+    config_.self_destruct_enabled = this->get_parameter("self_destruct.enabled").as_bool();
+    config_.self_destruct_altitude_threshold_m = this->get_parameter("self_destruct.altitude_threshold_m").as_double();
+    config_.self_destruct_climb_vel_mps = this->get_parameter("self_destruct.climb_vel_mps").as_double();
+    config_.self_destruct_climb_acc_mps2 = this->get_parameter("self_destruct.climb_acc_mps2").as_double();
+    config_.self_destruct_link_loss_timeout_ms = this->get_parameter("self_destruct.link_loss_timeout_ms").as_int();
+    config_.self_destruct_dry_run = this->get_parameter("self_destruct.dry_run").as_bool();
 
 
     // === Commander параметры (moved from loadParameters) ===
@@ -1064,6 +1076,32 @@ namespace los_guidance
             std::lock_guard<std::mutex> lock(state_mutex_);
             waypoint_speed_ = speed;
             RCLCPP_INFO(this->get_logger(), "🚀 Waypoint speed set to %.1f m/s", waypoint_speed_);
+          },
+          // 🆕 Колбэк для set_bamper
+          [this](bool enabled)
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            bamper_mode_ = enabled;
+            RCLCPP_INFO(this->get_logger(), "💣 Bamper mode set to: %s", enabled ? "ATTACK" : "RETURN");
+          },
+          // 🆕 Колбэк для set_self_destruct_mode
+          [this](bool armed)
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            self_destruct_armed_ = armed;
+            if (!armed) {
+              // Деактивация — сбрасываем всё
+              self_destruct_active_ = false;
+              attack_signal_sent_ = false;
+              vehicle_ctrl_->publishAttackServo(false);
+            }
+            RCLCPP_INFO(this->get_logger(), "☠️ Self-destruct mode: %s", armed ? "ARMED" : "DISARMED");
+          },
+          // 🆕 Колбэк для ping/heartbeat
+          [this]()
+          {
+            last_heartbeat_time_ = std::chrono::steady_clock::now();
+            heartbeat_received_ = true;
           }
         
         ); // ← Закрывающая скобка конструктора Commander
@@ -1179,6 +1217,7 @@ namespace los_guidance
     gps_pos_sub_ = this->create_subscription<px4_msgs::msg::VehicleGlobalPosition>(
         "/fmu/out/vehicle_global_position",
         rclcpp::SensorDataQoS().keep_last(1),
+        //qos,
         std::bind(&Node::vehicleGlobalPositionCallback, this, std::placeholders::_1),
         control_sub_opts);
 
@@ -1258,11 +1297,26 @@ namespace los_guidance
 
   void Node::vehicleGlobalPositionCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg)
   {
+
+
+      //  RCLCPP_INFO(this->get_logger(), "--------- 055555 GPS from   (use_uart_gps_: %s)",
+                              
+      //                         use_uart_gps_ ? "Y" : "N");
+
     if (!msg)
       return;
 
-    std::lock_guard<std::mutex> lock(state_mutex_);
+      //  RCLCPP_INFO(this->get_logger(), "--------- 15555 GPS from VehicleGlobalPosition: %.7f, %.7f, %.2f  (use_uart_gps_: %s)",
+      //                         msg->lat, msg->lon, msg->alt,
+      //                         use_uart_gps_ ? "Y" : "N");
 
+      //  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 10,
+      //                         "--------- 25555 GPS from VehicleGlobalPosition: %.7f, %.7f, %.2f  (use_uart_gps_: %s)",
+      //                         msg->lat, msg->lon, msg->alt,
+      //                         use_uart_gps_ ? "Y" : "N");
+
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    
     if (use_uart_gps_)
     {
       // Не обновляем lat/lon/alt из PX4
@@ -1293,11 +1347,16 @@ namespace los_guidance
       {
         sensor_sync_->addMessage("drone_gps", msg->timestamp_sample, msg);
 
-        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                              "GPS: %.7f, %.7f, %.2f (valid: %s)",
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                              " 3 GPS: %.7f, %.7f, %.2f (valid: %s)",
                               msg->lat, msg->lon, msg->alt,
                               drone_gps_.is_valid ? "Y" : "N");
       }
+
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                           "📍 SHOWGPS will return: lat=%.6f lon=%.6f alt=%.2f valid=%s",
+                           drone_gps_.lat, drone_gps_.lon, drone_gps_.alt,
+                           drone_gps_.is_valid ? "Y" : "N");
     }
   }
 
@@ -1312,7 +1371,7 @@ namespace los_guidance
       double horizontal_vel = std::sqrt(msg->vx * msg->vx + msg->vy * msg->vy);
       guidance_ctrl_->setGpsVelocity(horizontal_vel);
 
-      RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                             "📊 Local velocity: vx=%.2f, vy=%.2f, vz=%.2f | hor=%.2f m/s",
                             msg->vx, msg->vy, msg->vz, horizontal_vel);
     }
@@ -1324,15 +1383,47 @@ namespace los_guidance
     if (!use_uart_gps_)
       return;
 
+          //  RCLCPP_INFO(this->get_logger(), "--------- 022 GPS   (use_uart_gps_: %s)",
+                              
+          //                     use_uart_gps_ ? "Y" : "N");
+
     GpsData uart_data = uart_gps_parser_.getData();
+
+
+        
+
+
+        // RCLCPP_INFO(this->get_logger(), "📡 --------- 122 UART GPS: %.6f, %.6f, %.2f (Sats: %d)",
+        //                     uart_data.latitude, uart_data.longitude, uart_data.altitude,
+        //                     uart_data.satellites);
+
+        // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 10,
+        //                     "📡 --------- 322 UART GPS: %.6f, %.6f, %.2f (Sats: %d)",
+        //                     uart_data.latitude, uart_data.longitude, uart_data.altitude,
+        //                     uart_data.satellites);
+                            
+    // if (!use_uart_gps_)
+    //   return;
+                            
+
+                // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 10,
+                //             "📡 --------- 111113342222 UART GPS: %.6f, %.6f, %.2f (Sats: %d)",
+                //             uart_data.latitude, uart_data.longitude, uart_data.altitude,
+                //             uart_data.satellites);
 
     if (uart_data.is_valid)
     {
-      RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
                             "📡 UART GPS: %.6f, %.6f, %.2f (Sats: %d)",
                             uart_data.latitude, uart_data.longitude, uart_data.altitude,
                             uart_data.satellites);
       {
+
+
+                // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 10,
+                //             "📡 --------- 42222 UART GPS: %.6f, %.6f, %.2f (Sats: %d)",
+                //             uart_data.latitude, uart_data.longitude, uart_data.altitude,
+                //             uart_data.satellites);
 
         // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 9000, "GPS messsage Subscribers uartGpsCallback");
 
@@ -1349,9 +1440,17 @@ namespace los_guidance
         static int log_counter = 0;
         if (++log_counter > 50)
         { // ~1 секунда при 50 Гц
-          RCLCPP_DEBUG(this->get_logger(), "📡 UART GPS Updated: %.6f, %.6f, %.2f",
+          RCLCPP_INFO(this->get_logger(), "📡 UART GPS Updated: %.6f, %.6f, %.2f",
                        drone_gps_.lat, drone_gps_.lon, drone_gps_.alt);
           log_counter = 0;
+
+
+
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+                            "📡 --------- 52222 UART GPS: %.6f, %.6f, %.2f (Sats: %d)",
+                            uart_data.latitude, uart_data.longitude, uart_data.altitude,
+                            uart_data.satellites);
+
         }
       }
     }
@@ -1814,6 +1913,122 @@ namespace los_guidance
       return;
     }
 
+    // ============================================================================
+    // ☠️ Self-destruct logic (link loss detection + climb + attack signal)
+    // ============================================================================
+    if (config_.self_destruct_enabled && self_destruct_armed_)
+    {
+      // 1. Link loss detection
+      bool link_lost = false;
+      if (heartbeat_received_)
+      {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_heartbeat_time_).count();
+        link_lost = (elapsed_ms > config_.self_destruct_link_loss_timeout_ms);
+      }
+
+      if (link_lost)
+      {
+        if (!self_destruct_active_)
+        {
+          // Link lost — start self-destruct sequence
+          self_destruct_active_ = true;
+          attack_signal_sent_ = false;
+          RCLCPP_WARN(this->get_logger(), "☠️☠️☠️ LINK LOST! Starting self-destruct sequence (bamper=%s)",
+                      bamper_mode_ ? "ATTACK" : "RETURN");
+
+          if (bamper_mode_)
+          {
+            // Switch to OFFBOARD and start climbing
+            if (vehicle_ctrl_->getCurrentMode() != FlightMode::OFFBOARD)
+            {
+              for (int i = 0; i < 10; i++)
+              {
+                vehicle_ctrl_->setOffboardMode();
+                vehicle_ctrl_->publishOffboardControlMode();
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+              }
+            }
+            RCLCPP_WARN(this->get_logger(), "☠️ CLIMBING at %.1f m/s (acc=%.1f m/s²)",
+                        -config_.self_destruct_climb_vel_mps, -config_.self_destruct_climb_acc_mps2);
+          }
+          else
+          {
+            // RETURN mode — just land
+            RCLCPP_WARN(this->get_logger(), "🛬 RETURN mode: landing");
+            px4_msgs::msg::VehicleCommand cmd;
+            cmd.command = 21; // MAV_CMD_NAV_LAND
+            cmd.param7 = 1.0f;
+            cmd.target_system = 1;
+            cmd.target_component = 1;
+            cmd.from_external = true;
+            cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+            vehicle_cmd_pub_->publish(cmd);
+          }
+        }
+
+        if (bamper_mode_ && self_destruct_active_)
+        {
+          // 2. Publish climb setpoint every cycle
+          px4_msgs::msg::TrajectorySetpoint climb_sp;
+          climb_sp.position = {NAN, NAN, NAN};
+          climb_sp.velocity = {0.0f, 0.0f, static_cast<float>(config_.self_destruct_climb_vel_mps)};
+          climb_sp.acceleration = {0.0f, 0.0f, static_cast<float>(config_.self_destruct_climb_acc_mps2)};
+          climb_sp.yaw = NAN;
+          climb_sp.yawspeed = NAN;
+          climb_sp.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+          trajectory_setpoint_pub_->publish(climb_sp);
+          vehicle_ctrl_->publishOffboardControlMode();
+
+          // 3. Check altitude threshold
+          double current_alt = 0.0;
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (drone_gps_.is_valid)
+              current_alt = drone_gps_.alt - start_alt_;
+          }
+
+          if (!attack_signal_sent_ && current_alt >= config_.self_destruct_altitude_threshold_m)
+          {
+            attack_signal_sent_ = true;
+            if (!config_.self_destruct_dry_run)
+            {
+              vehicle_ctrl_->publishAttackServo(true);
+              RCLCPP_WARN(this->get_logger(), "☠️☠️☠️ ATTACK SIGNAL SENT at %.1f m (threshold=%.0f m)",
+                          current_alt, config_.self_destruct_altitude_threshold_m);
+            }
+            else
+            {
+              RCLCPP_WARN(this->get_logger(), "☠️☠️☠️ DRY RUN: would send attack signal at %.1f m (threshold=%.0f m)",
+                          current_alt, config_.self_destruct_altitude_threshold_m);
+            }
+          }
+          else if (attack_signal_sent_)
+          {
+            // Keep publishing the signal
+            if (!config_.self_destruct_dry_run)
+              vehicle_ctrl_->publishAttackServo(true);
+          }
+
+          RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+              "☠️ SELF-DESTRUCT: alt=%.1f/%.0f signal=%s",
+              current_alt, config_.self_destruct_altitude_threshold_m,
+              attack_signal_sent_ ? "SENT" : "WAITING");
+        }
+      }
+      else
+      {
+        // Link is alive — cancel self-destruct if active
+        if (self_destruct_active_)
+        {
+          self_destruct_active_ = false;
+          attack_signal_sent_ = false;
+          vehicle_ctrl_->publishAttackServo(false);
+          RCLCPP_WARN(this->get_logger(), "✅ Link restored — self-destruct CANCELLED");
+        }
+      }
+    }
 
     // 🎮 Обработка ручного управления от джойстика (если включен)
     if (manual_input_.updated.load(std::memory_order_acquire))
