@@ -413,7 +413,7 @@ namespace los_guidance
     // === Компоненты (контроллеры) ===
     std::unique_ptr<TargetTracker> target_tracker_;     ///< Трекинг цели
     std::unique_ptr<LosEstimator> los_estimator_;       ///< Kalman Filter LOS
-    std::unique_ptr<GuidanceController> guidance_ctrl_; ///< Алгоритмы наведения
+    std::unique_ptr<GuidanceController> guidance_ctrl_; ///< Алгоритмы наведения + 🧠 ONNX
     std::unique_ptr<VehicleController> vehicle_ctrl_;   ///< Управление PX4
     std::unique_ptr<SensorSync> sensor_sync_;           ///< Синхронизация данных
 

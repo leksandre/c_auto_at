@@ -58,6 +58,13 @@ los_guidance_node:
       enable_acceleration_parallel: true
       top_attack_mode: true
       
+      # 🧠 Нейросетевое наведение (RL/BC модель)
+      # После обучения: скопировать rl_drone_policy.onnx и scaler в model_path/scaler_path
+      neural:
+        enabled: false             # false = алгоритм (PN/PI/Intercept), true = нейросеть (ONNX)
+        model_path: "/simulation_ws/onnx_model/rl_drone_policy.onnx"
+        scaler_path: "/simulation_ws/onnx_model/rl_drone_policy_scaler.npz"
+      
       # 🆕 Компенсация ЦТ (если сместился)
       cg_trim_pitch_deg: 2.5       # Настроить экспериментально
       enable_cg_compensation: true

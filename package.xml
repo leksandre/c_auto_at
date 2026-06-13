@@ -17,6 +17,9 @@
   <depend>ai_service</depend>
   <depend>std_srvs</depend>
 
+  <!-- ONNX Runtime for neural guidance inference -->
+  <depend>libonnxruntime-dev</depend>
+
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

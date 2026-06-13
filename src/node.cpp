@@ -462,10 +462,39 @@ namespace los_guidance
     guidance_config_.mass_ratio = this->get_parameter("guidance.mass.mass_ratio").as_double();
     guidance_config_.accel_scale = this->get_parameter("guidance.mass.accel_scale").as_double();
 
+    // 🧠 Параметры нейросетевого наведения (ONNX)
+    this->declare_parameter("guidance.neural.enabled", false);
+    this->declare_parameter("guidance.neural.model_path", "");
+    this->declare_parameter("guidance.neural.scaler_path", "");
+    guidance_config_.use_neural_network = this->get_parameter("guidance.neural.enabled").as_bool();
+    guidance_config_.nn_model_path = this->get_parameter("guidance.neural.model_path").as_string();
+    guidance_config_.nn_scaler_path = this->get_parameter("guidance.neural.scaler_path").as_string();
+
+    // GuidanceController сам загрузит ONNX модель в конструкторе (если use_neural_network=true)
     guidance_ctrl_ = std::make_unique<GuidanceController>(
         guidance_config_,
         config_.update_ms / 1000.0 // dt в секундах
     );
+
+    if (guidance_config_.use_neural_network)
+    {
+      if (guidance_ctrl_->isNeuralNetworkLoaded())
+      {
+        RCLCPP_INFO(this->get_logger(),
+                    "🧠 Neural guidance ENABLED — model: %s",
+                    guidance_config_.nn_model_path.c_str());
+      }
+      else
+      {
+        RCLCPP_WARN(this->get_logger(),
+                    "⚠️ Neural guidance FAILED — falling back to algorithmic guidance");
+      }
+    }
+    else
+    {
+      RCLCPP_INFO(this->get_logger(),
+                  "🧠 Neural guidance DISABLED — using algorithmic guidance (PN/PI/Intercept)");
+    }
 
     // === 4. Vehicle Controller ===
     {
@@ -1426,12 +1455,9 @@ namespace los_guidance
     }
 
     // 🎯 Расчёт ускорения через GuidanceController
+    // (алгоритмическое PN/PI/Intercept ИЛИ нейросетевое ONNX — выбирается внутри)
     GuidanceOutput output = guidance_ctrl_->computeAcceleration(
-        u_los,
-        lambda,
-        pitch,
-        yaw,
-        roll); // ← полная трансформация body→nav
+        u_los, lambda, pitch, yaw, roll);
     //Eigen::Vector3d acc_cmd = output.acceleration_cmd;
     Eigen::Vector3d acc_cmd = output.acceleration_frd;
 

@@ -1,6 +1,6 @@
 /**
  * @file guidance_controller.hpp
- * @brief Контроллер наведения - реализует алгоритмы PN, PI, Intercept
+ * @brief Контроллер наведения - реализует алгоритмы PN, PI, Intercept + ONNX нейросеть
  * @note Все параметры загружаются из YAML конфига, класс тестирован независимо от ROS2
  *
  * @author Snow Pang, ssnowpang@gmail.com
@@ -18,7 +18,23 @@
 #include <mutex>
 #include <algorithm>
 #include <cmath>
+#include <array>
+#include <string>
+#include <vector>
 #include "los_guidance/adrc.hpp"
+
+// ── ONNX Runtime (опционально) ──────────────────────────────────────────
+// Note: onnxruntime headers may be installed flat in /usr/local/include/
+// or in a subdirectory. Try both paths.
+#ifdef __has_include
+#  if __has_include(<onnxruntime/core/session/onnxruntime_cxx_api.h>)
+#    include <onnxruntime/core/session/onnxruntime_cxx_api.h>
+#    define HAS_ONNX_RUNTIME
+#  elif __has_include(<onnxruntime_cxx_api.h>)
+#    include <onnxruntime_cxx_api.h>
+#    define HAS_ONNX_RUNTIME
+#  endif
+#endif
 
 namespace los_guidance
 {
@@ -100,7 +116,10 @@ namespace los_guidance
     double cg_trim_pitch_deg{2.5};
     bool enable_cg_compensation{true};
 
-    
+    // 🧠 Нейросетевое наведение (ONNX)
+    bool use_neural_network{false};     ///< Использовать нейросеть вместо алгоритма
+    std::string nn_model_path;          ///< Путь к ONNX модели
+    std::string nn_scaler_path;         ///< Путь к scaler_params.npz
 
     double ship_mode_response_factor{0.3};
     double manual_roll_deadzone{0.1};
@@ -119,16 +138,10 @@ namespace los_guidance
     bool allow_vision_attack{true};
     bool allow_autoland{true};
 
-
-
         // === Параметры масштабирования ускорения (clamp) ===
     double clamp_modifications_scale_x{1.0};           // Множитель масштабирования для X оси
     double clamp_modifications_scale_y{1.0};           // Множитель масштабирования для Y оси
     double clamp_modifications_scale_z{1.0};           // Множитель масштабирования для Z оси
-    
-
-
-
   };
 
   /**
@@ -300,6 +313,30 @@ namespace los_guidance
      */
     void setGpsVelocity(double velocity_mps) { gps_velocity_ = velocity_mps; }
 
+    // 🧠 === ONNX Neural Network Inference ===
+
+    /**
+     * @brief Загрузка ONNX модели для нейросетевого наведения
+     * @param model_path Путь к .onnx файлу
+     * @param scaler_path Путь к scaler_params.npz (опционально)
+     * @return true если модель загружена успешно
+     */
+    bool loadOnnxModel(
+        const std::string &model_path,
+        const std::string &scaler_path = "");
+
+    /**
+     * @brief Включение/выключение нейросетевого режима
+     * @param enable true = нейросеть, false = алгоритм
+     */
+    void setUseNeuralNetwork(bool enable);
+
+    /**
+     * @brief Проверка, загружена ли ONNX модель
+     * @return true если модель загружена
+     */
+    bool isNeuralNetworkLoaded() const;
+
   private:
     /**
      * @brief Внутренняя реализация расчёта ускорения (общая для обоих публичных методов)
@@ -358,6 +395,41 @@ namespace los_guidance
 
     // === Отладка ===
     GuidanceDebug debug_info_;
+
+    // 🧠 === ONNX Neural Network ===
+    bool use_nn_{false};                                    ///< Флаг: использовать нейросеть
+    bool scaler_loaded_{false};                             ///< Scaler параметры загружены
+    std::array<float, 9> nn_mean_{};                        ///< X_mean (9,) для нормализации
+    std::array<float, 9> nn_scale_{};                       ///< X_scale (9,) для нормализации
+    std::array<float, 3> nn_y_max_{};                       ///< y_max (3,) для денормализации
+    std::unique_ptr<Ort::Session> onnx_session_;            ///< ONNX Runtime сессия
+    Ort::MemoryInfo onnx_memory_info_{nullptr};             ///< Memory info для тензоров
+    std::vector<const char *> onnx_input_names_;            ///< Имена входов
+    std::vector<const char *> onnx_output_names_;           ///< Имена выходов
+    static Ort::Env onnx_env_;                              ///< ONNX Runtime окружение (static — один на все экземпляры)
+
+    /**
+     * @brief Вычисление ускорения через нейросеть
+     * @param u_los Нормированный LOS вектор
+     * @param lambda Угловая скорость LOS
+     * @param roll_rad Крен (rad)
+     * @param pitch_rad Тангаж (rad)
+     * @param yaw_rad Рыскание (rad)
+     * @return GuidanceOutput с командой ускорения
+     */
+    GuidanceOutput computeNN_(
+        const Eigen::Vector3d &u_los,
+        const Eigen::Vector3d &lambda,
+        double roll_rad,
+        double pitch_rad,
+        double yaw_rad);
+
+    /**
+     * @brief Загрузка scaler параметров из .npz файла
+     * @param scaler_path Путь к scaler_params.npz
+     * @return true если загружено успешно
+     */
+    bool loadScalerParams_(const std::string &scaler_path);
 
     // === Константы ===
     static constexpr double CONSTANTS_ONE_G = 9.80665;

@@ -1,0 +1,22 @@
+# RL Pipeline Dependencies
+# Install with: pip install -r rl/requirements.txt
+
+# Core RL
+gymnasium>=0.29.0
+stable-baselines3[extra]>=2.3.0
+torch>=2.0.0
+
+# Monitoring
+tensorboard>=2.14.0
+
+# ONNX export
+onnx>=1.15.0
+onnxruntime>=1.17.0
+
+# ROS2 (usually pre-installed in ROS2 environment)
+# rclpy
+# geometry_msgs
+# std_srvs
+
+# Utilities
+numpy>=1.24.0

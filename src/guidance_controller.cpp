@@ -12,15 +12,30 @@
 #include <Eigen/Geometry>
 #include <rclcpp/rclcpp.hpp> // Здесь определены RCLCPP_INFO, RCLCPP_WARN, RCLCPP_ERROR и RCLCPP_DEBUG
 
+// ── ONNX Runtime ────────────────────────────────────────────────────────
+#ifdef HAS_ONNX_RUNTIME
+#  include <onnxruntime/core/session/onnxruntime_cxx_api.h>
+#endif
+
+#include <fstream>
+#include <cstring>
+#include <numeric>
+
 namespace los_guidance
 {
+
+  // ── Static ONNX Runtime environment ───────────────────────────────────
+#ifdef HAS_ONNX_RUNTIME
+  Ort::Env GuidanceController::onnx_env_(ORT_LOGGING_LEVEL_WARNING, "guidance_onnx");
+#endif
 
   // ============================================================================
   // Конструктор
   // ============================================================================
 
   GuidanceController::GuidanceController(const GuidanceConfig &config, double dt)
-      : config_(config), dt_(dt)
+      : config_(config), dt_(dt),
+        onnx_memory_info_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault))
   {
     // Вычисление линейных пределов для оценки скорости
     vc_linear_max_ = std::sqrt(std::tan(config_.max_lat_acc / CONSTANTS_ONE_G));
@@ -32,6 +47,12 @@ namespace los_guidance
 
     // Сброс состояний
     reset();
+
+    // 🧠 Автозагрузка ONNX модели, если указан путь
+    if (config_.use_neural_network && !config_.nn_model_path.empty())
+    {
+      loadOnnxModel(config_.nn_model_path, config_.nn_scaler_path);
+    }
   }
 
   // ============================================================================
@@ -100,7 +121,13 @@ namespace los_guidance
     GuidanceOutput output;
     output.Vc_estimate = Vc;
 
-    // Выбор алгоритма наведения
+    // ── Нейросетевой режим (ONNX) ──────────────────────────────────────
+    if (use_nn_ && onnx_session_)
+    {
+      return computeNN_(u_los, lambda, roll_rad, pitch_rad, yaw_rad);
+    }
+
+    // ── Классический алгоритм (PN/PI/Intercept) ────────────────────────
     Eigen::Vector3d acc_cmd;
     if (config_.enable_PI_control)
     {
@@ -610,6 +637,295 @@ namespace los_guidance
       RCLCPP_DEBUG(rclcpp::get_logger("guidance_ctrl"), "Attack mode disabled, states reset.");
 
     }
+  }
+
+  // ============================================================================
+  // ONNX Neural Network Inference
+  // ============================================================================
+
+  bool GuidanceController::loadOnnxModel(
+      const std::string &model_path,
+      const std::string &scaler_path)
+  {
+#ifdef HAS_ONNX_RUNTIME
+    try
+    {
+      Ort::SessionOptions session_options;
+      session_options.SetIntraOpNumThreads(1);
+      session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+
+      onnx_session_ = std::make_unique<Ort::Session>(
+          onnx_env_, model_path.c_str(), session_options);
+
+      // Получаем имена входов/выходов
+      Ort::AllocatorWithDefaultOptions allocator;
+      onnx_input_names_.clear();
+      onnx_output_names_.clear();
+
+      size_t num_inputs = onnx_session_->GetInputCount();
+      for (size_t i = 0; i < num_inputs; i++)
+      {
+        auto name = onnx_session_->GetInputNameAllocated(i, allocator);
+        onnx_input_names_.push_back(name.get());
+      }
+
+      size_t num_outputs = onnx_session_->GetOutputCount();
+      for (size_t i = 0; i < num_outputs; i++)
+      {
+        auto name = onnx_session_->GetOutputNameAllocated(i, allocator);
+        onnx_output_names_.push_back(name.get());
+      }
+
+      RCLCPP_INFO(rclcpp::get_logger("guidance_ctrl"),
+                  "✅ ONNX model loaded: %s (inputs=%zu, outputs=%zu)",
+                  model_path.c_str(), num_inputs, num_outputs);
+
+      // Загрузка scaler параметров
+      if (!scaler_path.empty())
+      {
+        loadScalerParams_(scaler_path);
+      }
+
+      use_nn_ = config_.use_neural_network;
+      return true;
+    }
+    catch (const Ort::Exception &e)
+    {
+      RCLCPP_ERROR(rclcpp::get_logger("guidance_ctrl"),
+                   "❌ Failed to load ONNX model: %s", e.what());
+      onnx_session_.reset();
+      use_nn_ = false;
+      return false;
+    }
+#else
+    (void)model_path;
+    (void)scaler_path;
+    RCLCPP_ERROR(rclcpp::get_logger("guidance_ctrl"),
+                 "❌ ONNX Runtime not available. Recompile with onnxruntime.");
+    return false;
+#endif
+  }
+
+  void GuidanceController::setUseNeuralNetwork(bool enable)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (enable && !onnx_session_)
+    {
+      RCLCPP_WARN(rclcpp::get_logger("guidance_ctrl"),
+                  "Cannot enable NN mode: no ONNX model loaded");
+      use_nn_ = false;
+      return;
+    }
+    use_nn_ = enable;
+    RCLCPP_INFO(rclcpp::get_logger("guidance_ctrl"),
+                "🧠 Neural network mode: %s", enable ? "ENABLED" : "DISABLED");
+  }
+
+  bool GuidanceController::isNeuralNetworkLoaded() const
+  {
+    return onnx_session_ != nullptr;
+  }
+
+  GuidanceOutput GuidanceController::computeNN_(
+      const Eigen::Vector3d &u_los,
+      const Eigen::Vector3d &lambda,
+      double roll_rad,
+      double pitch_rad,
+      double yaw_rad)
+  {
+    GuidanceOutput output;
+    output.is_valid = false;
+
+#ifdef HAS_ONNX_RUNTIME
+    try
+    {
+      // ── Сбор входных данных (9 floats) ───────────────────────────────
+      // Порядок: [u_los_x, u_los_y, u_los_z, lambda_x, lambda_y, lambda_z, roll, pitch, yaw]
+      std::array<float, 9> input = {
+          static_cast<float>(u_los.x()), static_cast<float>(u_los.y()), static_cast<float>(u_los.z()),
+          static_cast<float>(lambda.x()), static_cast<float>(lambda.y()), static_cast<float>(lambda.z()),
+          static_cast<float>(roll_rad), static_cast<float>(pitch_rad), static_cast<float>(yaw_rad)
+      };
+
+      // ── Нормализация через X_mean / X_scale ──────────────────────────
+      if (scaler_loaded_)
+      {
+        for (int i = 0; i < 9; i++)
+        {
+          input[i] = (input[i] - nn_mean_[i]) / nn_scale_[i];
+        }
+      }
+
+      // ── Создание тензора ─────────────────────────────────────────────
+      std::array<int64_t, 2> input_shape = {1, 9};
+      Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+          onnx_memory_info_,
+          input.data(), input.size(),
+          input_shape.data(), input_shape.size());
+
+      // ── Инференс ─────────────────────────────────────────────────────
+      auto output_tensors = onnx_session_->Run(
+          Ort::RunOptions{},
+          onnx_input_names_.data(), &input_tensor, onnx_input_names_.size(),
+          onnx_output_names_.data(), onnx_output_names_.size());
+
+      if (output_tensors.empty())
+      {
+        RCLCPP_WARN(rclcpp::get_logger("guidance_ctrl"),
+                    "NN inference returned empty output");
+        return output;
+      }
+
+      // ── Извлечение результата ────────────────────────────────────────
+      float *output_data = output_tensors[0].GetTensorMutableData<float>();
+
+      // ── Денормализация через y_max ───────────────────────────────────
+      Eigen::Vector3d acc_frd;
+      if (scaler_loaded_)
+      {
+        acc_frd.x() = static_cast<double>(output_data[0] * nn_y_max_[0]);
+        acc_frd.y() = static_cast<double>(output_data[1] * nn_y_max_[1]);
+        acc_frd.z() = static_cast<double>(output_data[2] * nn_y_max_[2]);
+      }
+      else
+      {
+        acc_frd.x() = static_cast<double>(output_data[0]);
+        acc_frd.y() = static_cast<double>(output_data[1]);
+        acc_frd.z() = static_cast<double>(output_data[2]);
+      }
+
+      // ── Заполнение output (через clamp + transform как в алгоритме) ──
+      output.acceleration_frd = acc_frd;
+      output.acceleration_cmd = transformAccToNav_(acc_frd, roll_rad, pitch_rad, yaw_rad);
+      output.is_valid = true;
+      last_acc_cmd_ = output.acceleration_cmd;
+
+      RCLCPP_DEBUG(rclcpp::get_logger("guidance_ctrl"),
+                   "🧠 NN acc: [%.3f, %.3f, %.3f] m/s²",
+                   acc_frd.x(), acc_frd.y(), acc_frd.z());
+
+      return output;
+    }
+    catch (const Ort::Exception &e)
+    {
+      RCLCPP_ERROR(rclcpp::get_logger("guidance_ctrl"),
+                   "❌ NN inference failed: %s", e.what());
+      output.is_valid = false;
+      return output;
+    }
+#else
+    (void)u_los;
+    (void)lambda;
+    (void)roll_rad;
+    (void)pitch_rad;
+    (void)yaw_rad;
+    RCLCPP_ERROR(rclcpp::get_logger("guidance_ctrl"),
+                 "❌ ONNX Runtime not available");
+    return output;
+#endif
+  }
+
+  bool GuidanceController::loadScalerParams_(const std::string &scaler_path)
+  {
+#ifdef HAS_ONNX_RUNTIME
+    try
+    {
+      // Загружаем .npz файл вручную (без numpy)
+      // Формат .npz: ZIP архив с файлами .npy
+      // Мы ожидаем ключи: X_mean (9,), X_scale (9,), y_max (3,)
+
+      FILE *fp = fopen(scaler_path.c_str(), "rb");
+      if (!fp)
+      {
+        RCLCPP_WARN(rclcpp::get_logger("guidance_ctrl"),
+                    "Scaler file not found: %s", scaler_path.c_str());
+        return false;
+      }
+
+      // Читаем весь файл в память
+      fseek(fp, 0, SEEK_END);
+      long fsize = ftell(fp);
+      rewind(fp);
+      std::vector<uint8_t> buffer(fsize);
+      fread(buffer.data(), 1, fsize, fp);
+      fclose(fp);
+
+      uint8_t *data_ptr = buffer.data();
+      size_t data_len = buffer.size();
+
+      // Поиск .npy данных по ключу
+      auto find_npy_data = [&](const std::string &key, float *out, int expected_count) -> bool
+      {
+        // Ищем ключ в буфере (как строку)
+        auto it = std::search(data_ptr, data_ptr + data_len,
+                              key.data(), key.data() + key.size());
+        if (it == data_ptr + data_len)
+          return false;
+
+        // Ищем magic .npy после ключа
+        const uint8_t npy_magic[] = {0x93, 'N', 'U', 'M', 'P', 'Y'};
+        auto npy_it = std::search(it + key.size(), data_ptr + data_len,
+                                  npy_magic, npy_magic + 6);
+        if (npy_it == data_ptr + data_len)
+          return false;
+
+        // Вычисляем смещение от начала буфера
+        size_t npy_offset = npy_it - data_ptr;
+
+        // Парсим заголовок .npy
+        // Формат: magic(6) + major(1) + minor(1) + header_len(4) + header_dict + padding
+        size_t header_start = npy_offset + 6; // после magic
+        uint32_t header_len = *reinterpret_cast<uint32_t *>(data_ptr + header_start + 2);
+
+        // Данные начинаются после заголовка с выравниванием до 64 байт
+        size_t data_offset = npy_offset + 6 + 2 + 4 + header_len; // magic + ver + hdr_len + hdr
+        // Выравнивание до 64 байт от начала .npy
+        size_t padding = (64 - (data_offset - npy_offset) % 64) % 64;
+        data_offset += padding;
+
+        // Проверяем, что данные влезают
+        if (data_offset + expected_count * sizeof(float) > data_len)
+          return false;
+
+        float *npy_data = reinterpret_cast<float *>(data_ptr + data_offset);
+        for (int i = 0; i < expected_count; i++)
+        {
+          out[i] = npy_data[i];
+        }
+        return true;
+      };
+
+      bool found_mean = find_npy_data("X_mean", nn_mean_.data(), 9);
+      bool found_scale = find_npy_data("X_scale", nn_scale_.data(), 9);
+      bool found_ymax = find_npy_data("y_max", nn_y_max_.data(), 3);
+
+      if (found_mean && found_scale && found_ymax)
+      {
+        scaler_loaded_ = true;
+        RCLCPP_INFO(rclcpp::get_logger("guidance_ctrl"),
+                    "✅ Scaler params loaded: X_mean, X_scale, y_max");
+        return true;
+      }
+      else
+      {
+        RCLCPP_WARN(rclcpp::get_logger("guidance_ctrl"),
+                    "⚠️  Scaler file incomplete: mean=%d scale=%d ymax=%d",
+                    found_mean, found_scale, found_ymax);
+        return false;
+      }
+    }
+    catch (const std::exception &e)
+    {
+      RCLCPP_WARN(rclcpp::get_logger("guidance_ctrl"),
+                  "⚠️  Failed to load scaler: %s", e.what());
+      return false;
+    }
+#else
+    (void)scaler_path;
+    RCLCPP_WARN(rclcpp::get_logger("guidance_ctrl"),
+                "⚠️  ONNX Runtime not available — scaler not loaded");
+    return false;
+#endif
   }
 
 } // namespace los_guidance

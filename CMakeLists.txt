@@ -18,6 +18,31 @@ find_package(ai_service REQUIRED)
 find_package(std_srvs REQUIRED)
 # find_package(message_filters REQUIRED)
 
+# ── ONNX Runtime ────────────────────────────────────────────────────────
+# Find onnxruntime. On Ubuntu with pip-installed onnxruntime:
+#   find_library(ONNX_RUNTIME_LIB onnxruntime)
+# Or use the system path if installed via apt.
+find_library(ONNX_RUNTIME_LIB
+  NAMES onnxruntime
+  PATHS /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu
+)
+if(ONNX_RUNTIME_LIB)
+  message(STATUS "✅ Found onnxruntime: ${ONNX_RUNTIME_LIB}")
+  add_definitions(-DONNX_RUNTIME_AVAILABLE)
+  # Find onnxruntime include path (headers are typically in /usr/local/include)
+  find_path(ONNX_RUNTIME_INCLUDE_DIR
+    NAMES onnxruntime_cxx_api.h
+    PATHS /usr/local/include /usr/include /usr/lib/x86_64-linux-gnu
+  )
+  if(ONNX_RUNTIME_INCLUDE_DIR)
+    message(STATUS "✅ Found onnxruntime headers: ${ONNX_RUNTIME_INCLUDE_DIR}")
+    include_directories(SYSTEM ${ONNX_RUNTIME_INCLUDE_DIR})
+  else()
+    message(WARNING "⚠️  onnxruntime headers not found — neural guidance will be disabled")
+  endif()
+else()
+  message(WARNING "⚠️  onnxruntime not found — neural guidance will be disabled")
+endif()
 
 include_directories(SYSTEM
   include
@@ -26,6 +51,7 @@ include_directories(SYSTEM
 
 set(project_LIBRARIES
   ${rclcpp_LIBRARIES}
+  ${ONNX_RUNTIME_LIB}
   #other_libs
 )
 
