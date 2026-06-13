@@ -294,23 +294,40 @@ class DroneAttackEnv(gym.Env, Node):
 
         # 4. Arm, takeoff, switch to offboard
         self._arm_and_takeoff()
-        time.sleep(3.0)
 
-        # 5. Start target movement
+        # 5. Wait for drone to actually reach altitude (with timeout)
+        takeoff_altitude = 30.0  # same as in _arm_and_takeoff
+        min_start_altitude = 5.0  # minimum altitude to start the episode
+        takeoff_timeout = 15.0    # max wait for takeoff
+        takeoff_start = time.time()
+
+        self.get_logger().info(f"⏳ Waiting for takeoff (target={takeoff_altitude}m, min={min_start_altitude}m, timeout={takeoff_timeout}s)...")
+        while time.time() - takeoff_start < takeoff_timeout:
+            # Check current altitude
+            current_alt = -self.drone_pos[2]  # NED: z-down, so altitude = -z
+            if current_alt >= min_start_altitude:
+                self.get_logger().info(f"✅ Takeoff confirmed at {current_alt:.1f}m")
+                break
+            time.sleep(0.5)
+        else:
+            self.get_logger().warn(f"⚠️ Takeoff timeout! Altitude={-self.drone_pos[2]:.1f}m, starting anyway")
+
+        # 6. Start target movement
         self._start_target_movement()
 
-        # 6. Reset episode tracking
+        # 7. Reset episode tracking
         self.episode_start_time = time.time()
         self.step_count = 0
         self.episode_reward = 0.0
         self.prev_distance = self._get_distance()
         self._prev_rel_pos = None
 
-        # 7. Get initial observation
+        # 8. Get initial observation
         obs = self._get_obs()
 
         self.get_logger().info(
             f"✅ Episode reset complete. "
+            f"Altitude: {-self.drone_pos[2]:.1f}m, "
             f"Distance to target: {self._get_distance():.1f}m"
         )
 
