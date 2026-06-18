@@ -63,6 +63,29 @@ TargetInfo TargetTracker::processTrackerResult(
   info.bbox_width = std::abs(msg->target_info.right - msg->target_info.left);
   info.bbox_height = std::abs(msg->target_info.bottom - msg->target_info.top);
   
+  double bbox_frac_w = info.bbox_width / (config_.cx * 2.0);
+  double bbox_frac_h = info.bbox_height / (config_.cy * 2.0);
+  bool bbox_too_large = (bbox_frac_w > config_.max_bbox_fraction || bbox_frac_h > config_.max_bbox_fraction);
+  if (bbox_too_large) {
+    bool hard_reject = (bbox_frac_w > 0.85 || bbox_frac_h > 0.85);
+    double img_w = config_.cx * 2.0;
+    double img_h = config_.cy * 2.0;
+    double cx_dist = std::abs(info.pixel_u - config_.cx) / img_w;
+    double cy_dist = std::abs(info.pixel_v - config_.cy) / img_h;
+    bool centered_enough = (cx_dist <= 0.25 && cy_dist <= 0.25);
+    bool near_last_bbox = false;
+    if (has_valid_bbox_) {
+      double dx = std::abs(info.pixel_u / img_w - last_valid_bbox_cx_);
+      double dy = std::abs(info.pixel_v / img_h - last_valid_bbox_cy_);
+      near_last_bbox = (dx < config_.bbox_proximity_threshold && dy < config_.bbox_proximity_threshold);
+    }
+    if (hard_reject || (!centered_enough && !near_last_bbox)) {
+      info.is_valid = false;
+      stats_.frames_dropped++;
+      return info;
+    }
+  }
+  
   // Сглаживание пикселей
   if (!pixel_initialized_) {
     info.pixel_u_smooth = info.pixel_u;
@@ -104,6 +127,9 @@ TargetInfo TargetTracker::processTrackerResult(
   last_timestamp_us_ = info.timestamp_us;
   
   info.is_valid = true;
+  last_valid_bbox_cx_ = info.pixel_u / (config_.cx * 2.0);
+  last_valid_bbox_cy_ = info.pixel_v / (config_.cy * 2.0);
+  has_valid_bbox_ = true;
   stats_.frames_processed++;
   
   return info;
@@ -126,6 +152,29 @@ TargetInfo TargetTracker::processDetection2D(
   info.pixel_v = msg->bbox.center.position.y;
   info.bbox_width = msg->bbox.size_x;
   info.bbox_height = msg->bbox.size_y;
+  
+  double bbox_frac_w = info.bbox_width / (config_.cx * 2.0);
+  double bbox_frac_h = info.bbox_height / (config_.cy * 2.0);
+  bool bbox_too_large = (bbox_frac_w > config_.max_bbox_fraction || bbox_frac_h > config_.max_bbox_fraction);
+  if (bbox_too_large) {
+    bool hard_reject = (bbox_frac_w > 0.85 || bbox_frac_h > 0.85);
+    double img_w = config_.cx * 2.0;
+    double img_h = config_.cy * 2.0;
+    double cx_dist = std::abs(info.pixel_u - config_.cx) / img_w;
+    double cy_dist = std::abs(info.pixel_v - config_.cy) / img_h;
+    bool centered_enough = (cx_dist <= 0.25 && cy_dist <= 0.25);
+    bool near_last_bbox = false;
+    if (has_valid_bbox_) {
+      double dx = std::abs(info.pixel_u / img_w - last_valid_bbox_cx_);
+      double dy = std::abs(info.pixel_v / img_h - last_valid_bbox_cy_);
+      near_last_bbox = (dx < config_.bbox_proximity_threshold && dy < config_.bbox_proximity_threshold);
+    }
+    if (hard_reject || (!centered_enough && !near_last_bbox)) {
+      info.is_valid = false;
+      stats_.frames_dropped++;
+      return info;
+    }
+  }
   
   // Сглаживание пикселей
   if (!pixel_initialized_) {
@@ -166,6 +215,9 @@ TargetInfo TargetTracker::processDetection2D(
   last_timestamp_us_ = info.timestamp_us;
   
   info.is_valid = true;
+  last_valid_bbox_cx_ = info.pixel_u / (config_.cx * 2.0);
+  last_valid_bbox_cy_ = info.pixel_v / (config_.cy * 2.0);
+  has_valid_bbox_ = true;
   stats_.frames_processed++;
   
   return info;
@@ -293,6 +345,9 @@ void TargetTracker::reset() {
   los_nav_history_.setZero();
   lambda_smooth_.setZero();
   last_timestamp_us_ = 0;
+  has_valid_bbox_ = false;
+  last_valid_bbox_cx_ = 0.5;
+  last_valid_bbox_cy_ = 0.5;
 }
 
 void TargetTracker::updateConfig(const TrackerConfig& config) {

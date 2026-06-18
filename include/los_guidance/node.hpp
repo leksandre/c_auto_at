@@ -103,6 +103,9 @@ namespace los_guidance
     double pixel_smooth_alpha{0.7};
     double los_smooth_alpha{0.3};
     double min_confidence{0.6};
+    // FIX: Max bbox fraction for LightTrack false positive filter.
+    // Bbox covering >60% of frame is rejected. See target_tracker.hpp.
+    double max_bbox_fraction{0.6};
 
     // Логирование
     int log_throttle_interval_ms{12000};

@@ -115,6 +115,8 @@ namespace los_guidance
     this->declare_parameter("camera.pixel_smooth_alpha", 0.7);
     this->declare_parameter("camera.los_smooth_alpha", 0.3);
     this->declare_parameter("camera.min_confidence", 0.6);
+    this->declare_parameter("camera.max_bbox_fraction", 0.6);
+    this->declare_parameter("camera.bbox_proximity_threshold", 0.15);
 
     config_.camera_fx = this->get_parameter("camera.fx").as_double();
     config_.camera_fy = this->get_parameter("camera.fy").as_double();
@@ -124,6 +126,7 @@ namespace los_guidance
     config_.pixel_smooth_alpha = this->get_parameter("camera.pixel_smooth_alpha").as_double();
     config_.los_smooth_alpha = this->get_parameter("camera.los_smooth_alpha").as_double();
     config_.min_confidence = this->get_parameter("camera.min_confidence").as_double();
+    config_.max_bbox_fraction = this->get_parameter("camera.max_bbox_fraction").as_double();
 
     // === Установка камеры ===
     this->declare_parameter("camera.install.roll_deg", 0.0);
@@ -419,6 +422,8 @@ namespace los_guidance
     tracker_config_.pixel_smooth_alpha = config_.pixel_smooth_alpha;
     tracker_config_.los_smooth_alpha = config_.los_smooth_alpha;
     tracker_config_.min_confidence = config_.min_confidence;
+    tracker_config_.max_bbox_fraction = config_.max_bbox_fraction;
+    tracker_config_.bbox_proximity_threshold = this->get_parameter("camera.bbox_proximity_threshold").as_double();
 
     target_tracker_ = std::make_unique<TargetTracker>(tracker_config_);
 
@@ -1483,13 +1488,23 @@ namespace los_guidance
     attack_ready_.store(true, std::memory_order_release);
 
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), config_.log_throttle_interval_ms,
-                         "✅ AI Thread: attack_ready_=true | conf=%.2f | acc=[%.2f,%.2f,%.2f] | KF: conv=%d, res=%.3f",
-                         target.confidence,
+                         "--- NN BLOCK ---------------------------------\n"
+                         "  NN INPUT (u_los + lambda + rpy):\n"
+                         "    u_los  = [%.4f, %.4f, %.4f]\n"
+                         "    lambda = [%.4f, %.4f, %.4f]\n"
+                         "    rpy    = [%.1f, %.1f, %.1f] deg\n"
+                         "  NN OUTPUT (FRD accel from neural net):\n"
+                         "    acc_nn = [%.3f, %.3f, %.3f] m/s2\n"
+                         "  State: conf=%.2f | KF conv=%d | res=%.3f\n"
+                         "------------------------------------------------",
+                         u_los.x(), u_los.y(), u_los.z(),
+                         lambda.x(), lambda.y(), lambda.z(),
+                         roll * 180.0 / M_PI, pitch * 180.0 / M_PI, yaw * 180.0 / M_PI,
                          acc_cmd.x(), acc_cmd.y(), acc_cmd.z(),
+                         target.confidence,
                          kf_converged ? 1 : 0,
                          debug_info.residual_norm);
   }
-
   bool Node::syncAndGetOrientation_(
       uint64_t ref_us,
       Eigen::Quaterniond& quat,

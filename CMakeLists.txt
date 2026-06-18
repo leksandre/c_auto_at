@@ -28,7 +28,6 @@ find_library(ONNX_RUNTIME_LIB
 )
 if(ONNX_RUNTIME_LIB)
   message(STATUS "✅ Found onnxruntime: ${ONNX_RUNTIME_LIB}")
-  add_definitions(-DONNX_RUNTIME_AVAILABLE)
   # Find onnxruntime include path (headers are typically in /usr/local/include)
   find_path(ONNX_RUNTIME_INCLUDE_DIR
     NAMES onnxruntime_cxx_api.h

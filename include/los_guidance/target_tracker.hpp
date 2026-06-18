@@ -38,6 +38,8 @@ struct TrackerConfig {
   double pixel_smooth_alpha{0.3};
   double los_smooth_alpha{0.1};
   double min_confidence{0.5};
+  double max_bbox_fraction{0.6};
+  double bbox_proximity_threshold{0.15};
   
   // Frame IDs
   std::string frame_id{"camera"};
@@ -187,6 +189,11 @@ private:
   Eigen::Vector3d lambda_smooth_{Eigen::Vector3d::Zero()};
   bool lambda_initialized_{false};
   
+  // Last valid bbox (normalized [0,1]) for edge-of-frame proximity check
+  double last_valid_bbox_cx_{0.5};
+  double last_valid_bbox_cy_{0.5};
+  bool has_valid_bbox_{false};
+
   // Статистика
   TrackerStats stats_;
   

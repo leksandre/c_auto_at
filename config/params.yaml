@@ -39,6 +39,8 @@ los_guidance_node:
       pixel_smooth_alpha: 0.7      # Увеличено для более резкой реакции
       los_smooth_alpha: 0.3        # Увеличено для более резкой реакции
       min_confidence: 0.4          # ↑ Было 0.5 (строже)
+      max_bbox_fraction: 0.6       # Макс. доля bbox от кадра (>0.6 = ложная цель)
+      bbox_proximity_threshold: 0.15  # Допуск(bbox) для edge-of-frame: если bbox близко к последнему валидному — не отбрасывать
     
     # === Kalman Filter LOS ===
     kalman:
