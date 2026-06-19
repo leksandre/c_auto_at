@@ -320,6 +320,7 @@ namespace los_guidance
     this->declare_parameter("waypoint.gps_loss_timeout_s", 1800.0); // 30 минут
     this->declare_parameter("waypoint.max_radius_from_home_m", 40000.0);
     this->declare_parameter("waypoint.cruise_altitude_m", 100.0);
+    this->declare_parameter("waypoint.yaw_align_tolerance_deg", 10.0); // 🆕
 
     commander_enabled_ = this->get_parameter("commander.enable").as_bool();
     commander_port_ = static_cast<int>(this->get_parameter("commander.port").as_int());
@@ -330,6 +331,7 @@ namespace los_guidance
     config_.waypoint_gps_loss_timeout_s = this->get_parameter("waypoint.gps_loss_timeout_s").as_double();
     config_.waypoint_max_radius_from_home_m = this->get_parameter("waypoint.max_radius_from_home_m").as_double();
     config_.waypoint_cruise_altitude_m = this->get_parameter("waypoint.cruise_altitude_m").as_double();
+    waypoint_yaw_align_tolerance_deg = this->get_parameter("waypoint.yaw_align_tolerance_deg").as_double(); // 🆕
 
     // === Загрузка GPS waypoints ===
     auto wp_strings = this->get_parameter("commander.gps_waypoints").as_string_array();
@@ -1594,6 +1596,12 @@ namespace los_guidance
     pitch = std::asin(-R(2, 0));
     yaw = std::atan2(R(1, 0), R(0, 0));
 
+    // 🆕 Сохраняем текущий yaw для waypoint alignment
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      current_yaw_ = yaw;
+    }
+
     // Матрица вращения nav → body
     R_nb = quat.toRotationMatrix();
 
@@ -2440,6 +2448,7 @@ namespace los_guidance
         {
           RCLCPP_INFO(this->get_logger(), "⏱️ Wait finished (%.1f s). Moving to next waypoint.", elapsed);
           waypoint_waiting_ = false;
+          waypoint_yaw_aligning_ = false; // 🆕 Сброс выравнивания
           current_waypoint_idx_++;
         }
         else
@@ -2487,18 +2496,19 @@ namespace los_guidance
         {
           RCLCPP_INFO(this->get_logger(), "⬆️ Climb finished (%.1f m). Moving to next waypoint.", waypoint_climb_target_);
           waypoint_climbing_ = false;
+          waypoint_yaw_aligning_ = false; // 🆕 Сброс выравнивания
           current_waypoint_idx_++;
         }
         else
         {
-          // Поднимаемся — публикуем setpoint с новой высотой
+          // Поднимаемся — публикуем setpoint с новой высотой (без горизонтального движения)
           Eigen::Vector3d climb_ned = gpsToNed(local_drone_gps.lat, local_drone_gps.lon,
                                                 local_drone_gps.alt, ref_lat, ref_lon, ref_alt);
           climb_ned.z() = target_alt_ned;
           vehicle_ctrl_->publishOffboardControlMode();
           vehicle_ctrl_->publishPositionSetpoint(climb_ned,
-                                                 Eigen::Vector3d{3.0, 0.0, 0.0},
-                                                 Eigen::Vector3d{1.0, 0.0, 0.0});
+                                                 Eigen::Vector3d{NAN, NAN, -10.0},
+                                                 Eigen::Vector3d{NAN, NAN, NAN});
           RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                                "⬆️ Climbing: current_alt=%.1f target_alt=%.1f",
                                current_alt_ned, target_alt_ned);
@@ -2543,9 +2553,55 @@ namespace los_guidance
                                     std::cos(lat1_rad) * std::sin(lat2_rad) -
                                     std::sin(lat1_rad) * std::cos(lat2_rad) * std::cos(dlon));
 
+      // === 🆕 Выравнивание yaw перед движением ===
+      double current_yaw_local;
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_yaw_local = current_yaw_;
+      }
+      // Вычисляем ошибку yaw (с учётом перехода через ±π)
+      double yaw_error = yaw_to_wp - current_yaw_local;
+      while (yaw_error > M_PI) yaw_error -= 2.0 * M_PI;
+      while (yaw_error < -M_PI) yaw_error += 2.0 * M_PI;
+      double yaw_error_deg = std::abs(yaw_error) * 180.0 / M_PI;
+
+      if (yaw_error_deg > waypoint_yaw_align_tolerance_deg && !waypoint_yaw_aligning_)
+      {
+        waypoint_yaw_aligning_ = true;
+        RCLCPP_INFO(this->get_logger(), "🔄 YAW ALIGN: need %.1f° rotation to waypoint", yaw_error_deg);
+      }
+
+      if (waypoint_yaw_aligning_)
+      {
+        if (yaw_error_deg <= waypoint_yaw_align_tolerance_deg)
+        {
+          waypoint_yaw_aligning_ = false;
+          RCLCPP_INFO(this->get_logger(), "✅ YAW ALIGNED: error=%.1f° < %.1f°", yaw_error_deg, waypoint_yaw_align_tolerance_deg);
+        }
+        else
+        {
+          // Разворачиваемся на месте — yaw rate proportional
+          double yaw_rate_cmd = std::clamp(yaw_error * 2.0, -1.0, 1.0); // рад/с
+          vehicle_ctrl_->publishOffboardControlMode();
+          px4_msgs::msg::TrajectorySetpoint hover_ts;
+          hover_ts.position = {NAN, NAN, NAN};
+          hover_ts.velocity = {NAN, NAN, NAN};
+          hover_ts.acceleration = {NAN, NAN, NAN};
+          hover_ts.yaw = static_cast<float>(yaw_to_wp);
+          hover_ts.yawspeed = NAN;
+          hover_ts.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+          trajectory_setpoint_pub_->publish(hover_ts);
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                               "🔄 YAW ALIGNING: current=%.1f° target=%.1f° error=%.1f°",
+                               current_yaw_local * 180.0 / M_PI, yaw_to_wp * 180.0 / M_PI, yaw_error_deg);
+          return;
+        }
+      }
+
       // === Проверка прибытия в waypoint ===
       if (dist_to_wp < config_.waypoint_arrival_tolerance_m)
       {
+        waypoint_yaw_aligning_ = false; // 🆕 Сброс выравнивания при прибытии
         RCLCPP_INFO(this->get_logger(), "📍 Arrived at waypoint %zu (dist=%.1fm < %.1fm). Action: %s",
                     wp_idx, dist_to_wp, config_.waypoint_arrival_tolerance_m, current_wp.action.c_str());
 
@@ -2590,6 +2646,7 @@ namespace los_guidance
         else
         {
           RCLCPP_WARN(this->get_logger(), "⚠️ Unknown waypoint action: '%s'. Moving to next.", current_wp.action.c_str());
+          waypoint_yaw_aligning_ = false; // 🆕 Сброс выравнивания
           current_waypoint_idx_++;
         }
 
@@ -2612,11 +2669,14 @@ namespace los_guidance
         std::lock_guard<std::mutex> lock(state_mutex_);
         current_speed = waypoint_speed_;
       }
+      Eigen::Vector3d current_ned = gpsToNed(local_drone_gps.lat, local_drone_gps.lon,
+                                              local_drone_gps.alt, ref_lat, ref_lon, ref_alt);
+      Eigen::Vector3d dir_to_wp = (wp_ned - current_ned).normalized();
       vehicle_ctrl_->publishOffboardControlMode();
       vehicle_ctrl_->publishPositionSetpoint(wp_ned,
-                                             Eigen::Vector3d{current_speed, 0.0, 0.0},  // скорость
-                                             Eigen::Vector3d{2.5, 0.0, 0.0},   // ускорение
-                                             yaw_to_wp                        // yaw в сторону waypoint
+                                             dir_to_wp * current_speed,
+                                             dir_to_wp * 2.5,
+                                             yaw_to_wp
       );
       return;
     }
@@ -4450,6 +4510,7 @@ namespace los_guidance
     // Сбрасываем флаги ожидания/подъёма
     waypoint_waiting_ = false;
     waypoint_climbing_ = false;
+    waypoint_yaw_aligning_ = false; // 🆕 Сброс выравнивания
 
     // Переходим к следующему waypoint
     current_waypoint_idx_++;

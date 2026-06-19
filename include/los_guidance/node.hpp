@@ -468,6 +468,7 @@ namespace los_guidance
     bool attack_enabled_{false};      ///< Авто-атака включена
     bool start_attack_{false};        ///< Сигнал начала атаки
     std::atomic<bool> attack_ready_{false}; ///< Система готова к атаке (lock-free)
+    double current_yaw_{0.0};         ///< 🆕 Текущий yaw дрона (rad, NED)
 
     // === Self-destruct state ===
     bool self_destruct_armed_{false};                 ///< Режим самоликвидации активирован (через TCP)
@@ -590,6 +591,8 @@ bool update_acc_setpoint_{false};
     double waypoint_climb_target_{0.0};           ///< Целевая высота подъёма (метры)
     std::chrono::steady_clock::time_point waypoint_climb_start_;  ///< Время начала подъёма
     double waypoint_speed_{7.0};                ///< 🆕 Скорость движения между waypoint (м/с)
+    bool waypoint_yaw_aligning_{false};         ///< 🆕 Дрон разворачивается к waypoint
+    double waypoint_yaw_align_tolerance_deg{10.0}; ///< 🆕 Допуск выравнивания yaw (градусы)
 
     // GPS loss handling
     std::chrono::steady_clock::time_point gps_loss_start_;  ///< Время начала потери GPS
