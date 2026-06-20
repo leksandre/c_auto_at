@@ -38,9 +38,11 @@ from px4_msgs.msg import (
 )
 from geometry_msgs.msg import Pose, Twist, Point
 from std_srvs.srv import Trigger, SetBool
+from ai_service.msg import TrackerResult
 
 import threading
 import time
+import subprocess
 import os
 import json
 
@@ -62,7 +64,7 @@ class DroneAttackEnv(gym.Env, Node):
     def __init__(
         self,
         max_episode_time: float = 30.0,
-        hit_threshold: float = 1.5,
+        hit_threshold: float = 1.0,
         max_distance: float = 100.0,
         min_altitude: float = 0.5,
         control_rate_hz: int = 50,
@@ -104,7 +106,7 @@ class DroneAttackEnv(gym.Env, Node):
         # When Gazebo runs at N× real-time, sim produces data N× faster.
         # We only need a small real-time pause to let sim advance.
         self._use_sim_sleep = True
-        self._sim_sleep_factor = 0.1  # sleep dt * factor (0.1 = 2ms at 50Hz)
+        self._sim_sleep_factor = 0.1  # sleep dt * factor (0.1 = 2ms at 50Hz, stable value)
         # Delay ATTACK START log by 4s after model creation to avoid
         # log spam during SB3 model initialization.
         self._env_created_time = time.time()
@@ -139,9 +141,13 @@ class DroneAttackEnv(gym.Env, Node):
 
         # ── Action & Observation Spaces ─────────────────────────────────────
         # Action: body-frame acceleration [acc_x, acc_y, acc_z] (m/s²)
+        # FIX: [-5,+5] was too small — gravity compensation needs +9.81
+        # in body Z to hover. With [-5,+5] the NN physically cannot hover
+        # and always falls. [-20,+20] allows hovering and matches BC model
+        # output range (y_max=[15.4, 0.68, 0.29]).
         self.action_space = spaces.Box(
-            low=np.array([-5.0, -5.0, -5.0], dtype=np.float32),
-            high=np.array([5.0, 5.0, 5.0], dtype=np.float32),
+            low=np.array([-20.0, -20.0, -20.0], dtype=np.float32),
+            high=np.array([20.0, 20.0, 20.0], dtype=np.float32),
         )
 
         # Observation: [u_los_xyz, lambda_xyz, roll, pitch, yaw] — 9 floats
@@ -161,12 +167,45 @@ class DroneAttackEnv(gym.Env, Node):
         self._rpy_prev = np.zeros(3)
         self.prev_distance = np.inf
         self.vehicle_status = None
-        self._prev_rel_pos = None
         self._odom_received = False
         self._target_received = False
         self._last_odom_time = 0.0
         # Last observation — used by _send_action to check target visibility
         self._last_obs = np.zeros(9, dtype=np.float32)
+
+        # ── Recovery mode (when LightTrack loses tracking) ─────────────
+        self._recovery_active = False
+        self._recovery_target_pos = np.zeros(3)  # NED position to fly to
+        self._recovery_speed = 5.0  # m/s toward recovery point
+        # Attack phase — only count hits after hover completes
+        self._attack_started = False
+
+        # ── LightTrack visual LOS state ──────────────────────────────────
+        self._visual_los_nav = np.zeros(3)       # LOS in nav frame from bbox
+        self._visual_lambda_nav = np.zeros(3)    # LOS angular velocity from bbox
+        self._visual_los_valid = False            # Is visual LOS available?
+        self._visual_los_prev = np.zeros(3)       # Previous visual LOS for lambda
+        self._visual_los_initialized = False
+        self._visual_lambda_smooth = np.zeros(3)
+        self._visual_lambda_initialized = False
+        self._tracker_last_timestamp = 0.0
+        # Camera intrinsics (match TargetTracker config in C++)
+        self._cam_fx = 410.0
+        self._cam_fy = 410.0
+        self._cam_cx = 640.0   # half image width (1280/2)
+        self._cam_cy = 360.0   # half image height (720/2)
+        self._cam_install_pitch_deg = -10.0  # camera tilt down
+        self._cam_install_roll_deg = 0.0
+        self._cam_install_yaw_deg = 0.0
+        # EMA smoothing
+        self._pixel_smooth_alpha = 0.3
+        self._los_smooth_alpha = 0.1
+        self._lambda_smooth_alpha = 0.3
+        self._pixel_u_prev = 0.0
+        self._pixel_v_prev = 0.0
+        self._pixel_initialized = False
+        # Precompute camera rotation matrices (body→camera, camera→body)
+        self._R_bc, self._R_cb = self._init_camera_matrices()
 
         # Episode tracking
         self.episode_start_time = 0.0
@@ -177,6 +216,13 @@ class DroneAttackEnv(gym.Env, Node):
         # RL agent sends random actions for ~2s before stabilising.
         # Without this, every episode immediately terminates with CRASH penalty.
         self._crash_grace_steps = 100  # 100 steps x 20ms = 2 seconds
+        # Stuck detection: if altitude unchanged for too long, episode is stuck
+        self._stuck_steps = 0
+        self._last_alt_for_stuck = 0.0
+        self._stuck_threshold = 250  # 5 seconds at 50Hz with no altitude change
+        # Soft reset failure counter — after N failures, request full pipeline restart
+        self._consecutive_reset_fails = 0
+        self._max_reset_fails = 3
 
         # Hit tracking — counts successful attacks across episodes
         self._total_hits = 0
@@ -246,6 +292,14 @@ class DroneAttackEnv(gym.Env, Node):
             qos,
         )
 
+        # LightTrack bbox subscriber — provides visual LOS from camera tracking
+        self.tracker_sub = self.create_subscription(
+            TrackerResult,
+            "/tracker_result",
+            self._tracker_cb,
+            qos,
+        )
+
         # ── Publishers ──────────────────────────────────────────────────
         self.setpoint_pub = self.create_publisher(
             TrajectorySetpoint,
@@ -291,11 +345,144 @@ class DroneAttackEnv(gym.Env, Node):
             pass
 
     # ──────────────────────────────────────────────────────────────────────
+    # LightTrack visual LOS (bbox → camera → body → nav)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _init_camera_matrices(self):
+        """Precompute body→camera and camera→body rotation matrices.
+        Matches TargetTracker C++ initCameraMatrices_()."""
+        pitch_c = np.radians(self._cam_install_pitch_deg)
+        roll_c = np.radians(self._cam_install_roll_deg)
+        yaw_c = np.radians(self._cam_install_yaw_deg)
+        # R_install: rotation by install angles (body → rotated frame)
+        cr, sr = np.cos(roll_c), np.sin(roll_c)
+        cp, sp = np.cos(pitch_c), np.sin(pitch_c)
+        cy, sy = np.cos(yaw_c), np.sin(yaw_c)
+        R_roll = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+        R_pitch = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+        R_yaw = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+        R_bc_install = R_yaw @ R_pitch @ R_roll
+        # Axis swap: Body(FRD) → Camera(RDF)
+        axis_swap = np.array([
+            [0, 1, 0],   # Body Y → Camera X
+            [0, 0, 1],   # Body Z → Camera Y
+            [1, 0, 0],   # Body X → Camera Z
+        ])
+        R_bc = axis_swap @ R_bc_install
+        R_cb = R_bc.T
+        return R_bc, R_cb
+
+    def _tracker_cb(self, msg):
+        """LightTrack /tracker_result callback. Converts bbox → visual LOS."""
+        ti = msg.target_info
+        if ti.confidence < 0.4:
+            self._visual_los_valid = False
+            return
+        # Normalized [0,1] bbox → pixel coordinates
+        pixel_u = (ti.left + ti.right) * self._cam_cx
+        pixel_v = (ti.top + ti.bottom) * self._cam_cy
+        # EMA smoothing of pixels
+        if not self._pixel_initialized:
+            pu, pv = pixel_u, pixel_v
+            self._pixel_initialized = True
+        else:
+            a = self._pixel_smooth_alpha
+            pu = self._pixel_u_prev + a * (pixel_u - self._pixel_u_prev)
+            pv = self._pixel_v_prev + a * (pixel_v - self._pixel_v_prev)
+        self._pixel_u_prev = pu
+        self._pixel_v_prev = pv
+        # Roll/pitch correction
+        pu_corr, pv_corr = self._correct_pixel_roll_pitch(pu, pv)
+        # Pixel → camera frame vector (pinhole model)
+        x_c = (pu_corr - self._cam_cx) / self._cam_fx
+        y_c = (pv_corr - self._cam_cy) / self._cam_fy
+        u_c = np.array([x_c, y_c, 1.0])
+        norm = np.linalg.norm(u_c)
+        if norm < 1e-6:
+            self._visual_los_valid = False
+            return
+        u_c = u_c / norm
+        # Camera → body → nav
+        u_b = self._R_cb @ u_c
+        # nav frame rotation (NED): R_nb^T * u_b
+        r, p, y = self.drone_rpy
+        R_nb = self._rpy_to_rot([r, p, y])  # body→nav
+        u_n = R_nb @ u_b  # body→nav
+        norm_n = np.linalg.norm(u_n)
+        if norm_n < 1e-6:
+            self._visual_los_valid = False
+            return
+        u_n = u_n / norm_n
+        # EMA smoothing of LOS
+        if not self._visual_los_initialized:
+            self._visual_los_nav = u_n
+            self._visual_los_initialized = True
+        else:
+            a = self._los_smooth_alpha
+            self._visual_los_nav = self._visual_los_nav + a * (u_n - self._visual_los_nav)
+        # Lambda (LOS angular velocity): cross(los, d_los/dt)
+        timestamp = msg.timestamp * 1e-9  # ns → s
+        dt = timestamp - self._tracker_last_timestamp if self._tracker_last_timestamp > 0 else 0.02
+        dt = max(dt, 1e-3)
+        if self._visual_los_prev is not None and np.linalg.norm(self._visual_los_prev) > 0:
+            u_dot = (self._visual_los_nav - self._visual_los_prev) / dt
+            lambda_raw = np.cross(self._visual_los_nav, u_dot)
+            # EMA smoothing of lambda
+            if not self._visual_lambda_initialized:
+                self._visual_lambda_nav = lambda_raw
+                self._visual_lambda_initialized = True
+            else:
+                a = self._lambda_smooth_alpha
+                self._visual_lambda_nav = self._visual_lambda_nav + a * (lambda_raw - self._visual_lambda_nav)
+        self._visual_los_prev = self._visual_los_nav.copy()
+        self._tracker_last_timestamp = timestamp
+        self._visual_los_valid = True
+
+    def _correct_pixel_roll_pitch(self, u, v):
+        """Correct pixel coordinates for drone roll/pitch. Matches C++ correctPixelRollPitch_()."""
+        x = (u - self._cam_cx) / self._cam_fx
+        y = (v - self._cam_cy) / self._cam_fy
+        r_cam = np.array([x, y, 1.0])
+        norm = np.linalg.norm(r_cam)
+        if norm < 1e-6:
+            return u, v
+        r_cam = r_cam / norm
+        # Correction rotation: undo body roll/pitch from camera ray
+        roll, pitch = self.drone_rpy[0], self.drone_rpy[1]
+        cr, sr = np.cos(roll), np.sin(roll)
+        cp, sp = np.cos(pitch), np.sin(pitch)
+        R_corr = np.array([
+            [cp, 0, sp],
+            [0, 1, 0],
+            [-sp, 0, cp]
+        ]) @ np.array([
+            [1, 0, 0],
+            [0, cr, -sr],
+            [0, sr, cr]
+        ])
+        r_corr = self._R_bc @ R_corr @ self._R_cb @ r_cam
+        if abs(r_corr[2]) < 1e-4:
+            return u, v
+        u_corr = self._cam_cx + self._cam_fx * (r_corr[0] / r_corr[2])
+        v_corr = self._cam_cy + self._cam_fy * (r_corr[1] / r_corr[2])
+        u_corr = np.clip(u_corr, 0.0, 2 * self._cam_cx)
+        v_corr = np.clip(v_corr, 0.0, 2 * self._cam_cy)
+        return u_corr, v_corr
+
+    # ──────────────────────────────────────────────────────────────────────
     # ROS2 Callbacks
     # ──────────────────────────────────────────────────────────────────────
 
     def _odom_cb(self, msg):
-        """Cache vehicle odometry with timesync glitch protection."""
+        """Cache vehicle odometry with timesync glitch protection.
+
+        FIX: After Gazebo teleport (set_pose/world reset), PX4 EKF
+        reinitializes and reports a large position jump. The old code
+        rejected this message AND all subsequent ones (because drone_pos
+        stayed at old value, so every new message looked like a glitch).
+        Now we accept large jumps after disarming (soft reset), allowing
+        odom to recover.
+        """
         pos = np.array([msg.position[0], msg.position[1], msg.position[2]])
         vel = np.array([msg.velocity[0], msg.velocity[1], msg.velocity[2]])
 
@@ -304,8 +491,16 @@ class DroneAttackEnv(gym.Env, Node):
             return
         if self._odom_received:
             jump = np.linalg.norm(pos - self.drone_pos)
-            if jump > 10.0:  # >10m in one step = timesync glitch
-                return
+            if jump > 10.0:
+                # After soft reset (disarm + rearm), large jumps are expected
+                # because Gazebo teleport resets model position. Accept the
+                # new position instead of rejecting it forever.
+                if jump < 100.0:
+                    self.get_logger().info(
+                        f"⚠️ Large odom jump {jump:.1f}m — accepting (likely post-reset)")
+                else:
+                    # Truly impossible jump (>100m) — skip
+                    return
 
         self.drone_pos = pos
         self.drone_vel = vel
@@ -386,20 +581,38 @@ class DroneAttackEnv(gym.Env, Node):
 
         if is_crashed or self._first_episode:
             if self._first_episode:
-                self.get_logger().info("First episode — arming and entering OFFBOARD...")
+                self.get_logger().info("First episode — waiting for PX4 to be ready...")
+                self._wait_for_px4_ready(timeout=30.0)
                 self._arm_and_takeoff()
                 self._first_episode = False
             else:
                 self.get_logger().warn(
                     f"🔄 Crash detected (alt={altitude:.1f}m, roll={np.degrees(roll_abs):.0f}°, "
                     f"pitch={np.degrees(pitch_abs):.0f}°) — soft reset")
-                self._soft_reset()
-                # Wait for odom to be fresh after rearm
-                for _ in range(50):
+                reset_ok = self._soft_reset()
+
+                if not reset_ok:
+                    # Soft reset failed too many times — signal training to restart
+                    self.get_logger().error(
+                        "💀 Soft reset failed — returning restart signal to training loop")
+                    return np.zeros(9, dtype=np.float32), {"needs_restart": True}
+
+                # Check if soft reset worked (odom fresh after 10s)
+                for _ in range(100):
                     rclpy.spin_once(self, timeout_sec=0.01)
-                    if self._odom_received and (time.time() - self._last_odom_time < 1.0):
+                    odom_age = time.time() - self._last_odom_time if self._last_odom_time > 0 else 999
+                    if odom_age < 2.0:
                         break
                     self._sim_sleep(0.1)
+
+                odom_age = time.time() - self._last_odom_time if self._last_odom_time > 0 else 999
+                if odom_age > 10.0:
+                    self.get_logger().warn(
+                        f"⚠️ Odom stale {odom_age:.0f}s after soft reset — "
+                        f"episode will terminate. External launcher will restart pipeline.")
+                    # Don't try _restart_pipeline() — it's unreliable (DDS doesn't reconnect).
+                    # Raise exception to trigger training exit and launcher restart.
+                    raise RuntimeError("ODOM_DEAD: EKF lost after soft reset, needs full pipeline restart")
 
             self._reset_alt = -self.drone_pos[2]
         else:
@@ -414,6 +627,11 @@ class DroneAttackEnv(gym.Env, Node):
             if distance > 60.0:
                 self.get_logger().info(f"Too far ({distance:.0f}m) — flying back...")
                 self._fly_toward_target(distance_threshold=60.0, timeout=20.0)
+                # Verify odom is still alive after fly-back
+                odom_age = time.time() - self._last_odom_time if self._last_odom_time > 0 else 999
+                if odom_age > 5.0:
+                    self.get_logger().warn("Odom stale after fly-back — triggering restart")
+                    raise RuntimeError("ODOM_DEAD: lost during fly-back, needs full pipeline restart")
 
             self._reset_alt = np.random.uniform(5.0, 20.0)
             self._fly_to_altitude(self._reset_alt, timeout=15.0)
@@ -428,17 +646,65 @@ class DroneAttackEnv(gym.Env, Node):
             f"Alt: {-self.drone_pos[2]:.1f}m, "
             f"Dist: {self._get_distance():.1f}m"
         )
+
+        # Ensure minimum altitude before attack — if below 2m, climb first
+        min_attack_alt = 2.0
+        climb_ok = False
+        for alt_attempt in range(5):
+            current_alt = -self.drone_pos[2]
+            if current_alt >= min_attack_alt:
+                climb_ok = True
+                break
+            # EKF divergence check — if altitude > 50m, EKF is lost
+            if current_alt > 50.0:
+                self.get_logger().error(
+                    f"💀 EKF DIVERGENCE: altitude={current_alt:.1f}m — "
+                    f"EKF position estimate is wrong. Full restart needed.")
+                raise RuntimeError(
+                    f"EKF_DIVERGENCE: altitude {current_alt:.1f}m, expected <50m")
+            self.get_logger().info(
+                f"⬆️ Alt {current_alt:.1f}m < {min_attack_alt}m — climbing (attempt {alt_attempt+1}/5)...")
+            self._fly_to_altitude(min_attack_alt + 1.0, timeout=20.0)
+
+        if not climb_ok:
+            current_alt = -self.drone_pos[2]
+            if current_alt > 50.0:
+                self.get_logger().error(
+                    f"💀 EKF DIVERGENCE: altitude={current_alt:.1f}m after climb attempts")
+                raise RuntimeError(
+                    f"EKF_DIVERGENCE: altitude {current_alt:.1f}m after 5 climb attempts")
+            self.get_logger().warn(
+                f"⚠️ Cannot climb above {min_attack_alt}m after 5 attempts "
+                f"(alt={current_alt:.1f}m) — drone stuck, ending episode")
+            return np.zeros(9, dtype=np.float32), {"drone_stuck": True}
+        target_yaw = self._compute_yaw_to_target()
+
         self._hover_and_face_target(duration=5.0)
         self.get_logger().info("HOVER PHASE complete — attack starting")
+        self._attack_started = True
 
         # 4. Reset internal state
         self.prev_distance = self._get_distance()
-        self._prev_rel_pos = None
         self.episode_start_time = time.time()
         self.step_count = 0
         self.episode_reward = 0.0
         self._total_episodes += 1
         self._rpy_prev = self.drone_rpy.copy()  # Reset EMA state for new episode
+        self._stuck_steps = 0
+        self._last_alt_for_stuck = -self.drone_pos[2]
+        # Reset visual LOS state for new episode
+        self._visual_los_valid = False
+        self._visual_los_initialized = False
+        self._visual_lambda_initialized = False
+        self._visual_los_nav = np.zeros(3)
+        self._visual_lambda_nav = np.zeros(3)
+        self._visual_los_prev = np.zeros(3)
+        self._pixel_initialized = False
+        self._tracker_last_timestamp = 0.0
+        # Reset recovery mode
+        self._recovery_active = False
+        # Attack phase — only count hits after hover completes
+        self._attack_started = False
 
         # 5. Get initial observation
         obs = self._get_obs()
@@ -548,13 +814,16 @@ class DroneAttackEnv(gym.Env, Node):
         """Wait until sim clock advances by sim_duration seconds."""
         self._sim_sleep(sim_duration)
     def _fly_to_altitude(self, target_alt, timeout=10.0):
-        """Climb/descend to target altitude. NaN XY = hold current position.
+        """Climb/descend to target altitude.
 
-        Used during reset to set drone to random altitude 5-20m.
-        Sends position setpoints with NaN XY (PX4 holds current XY).
+        PX4 OFFBOARD position control doesn't work from ground level.
+        We use velocity-based takeoff first (climb at 2 m/s), then
+        switch to position control once airborne.
         """
         start = time.time()
         self.get_logger().info(f"Flying to altitude {target_alt:.1f}m (current: {-self.drone_pos[2]:.1f}m)")
+
+        climb_speed = 2.0  # m/s upward (NED: negative Z)
 
         while time.time() - start < timeout:
             current_alt = -self.drone_pos[2]
@@ -566,16 +835,25 @@ class DroneAttackEnv(gym.Env, Node):
 
             offboard_msg = OffboardControlMode()
             offboard_msg.timestamp = int(time.time() * 1e6)
-            offboard_msg.position = True
-            self.offboard_pub.publish(offboard_msg)
 
             ts = TrajectorySetpoint()
-            ts.position = [float("nan"), float("nan"), -float(target_alt)]
-            ts.velocity = [float("nan"), float("nan"), float("nan")]
             ts.yaw = float("nan")
             ts.timestamp = int(time.time() * 1e6)
+
+            if current_alt < target_alt - 0.5:
+                # Below target: velocity climb (NED: up = negative Z)
+                offboard_msg.velocity = True
+                ts.velocity = [0.0, 0.0, -climb_speed]
+                ts.position = [float("nan")] * 3
+            else:
+                # At or above target: position hold
+                offboard_msg.position = True
+                ts.position = [float("nan"), float("nan"), -float(target_alt)]
+                ts.velocity = [float("nan"), float("nan"), float("nan")]
+
+            self.offboard_pub.publish(offboard_msg)
             self.setpoint_pub.publish(ts)
-            self._sim_sleep(0.1)
+            self._sim_sleep(0.05)
 
         self.get_logger().warn(f"Altitude timeout ({timeout}s, wanted {target_alt:.1f}m, got {-self.drone_pos[2]:.1f}m)")
 
@@ -633,7 +911,7 @@ class DroneAttackEnv(gym.Env, Node):
         # 7. Info dict
         info = {
             "distance": self._get_distance(),
-            "hit": terminated and self._get_distance() < self.hit_threshold,
+            "hit": terminated and self._get_distance() < self.hit_threshold and self._attack_started,
             "step": self.step_count,
             "time": time.time() - self.episode_start_time,
             "episode_reward": self.episode_reward,
@@ -664,28 +942,23 @@ class DroneAttackEnv(gym.Env, Node):
 
     def _get_obs(self):
         """
-        Build 9-dim observation vector matching BC model interface.
+        Build 9-dim observation vector from LightTrack visual tracking ONLY.
+
+        NO GPS data. Only camera-based bbox → LOS conversion.
+        Ground truth from Gazebo used ONLY for reward (distance, hit check).
 
         Returns:
             [u_los_x, u_los_y, u_los_z,     # 0:3 — unit LOS vector (nav frame)
              lambda_x, lambda_y, lambda_z,   # 3:6 — LOS angular velocity (rad/s)
              roll, pitch, yaw]               # 6:9 — drone attitude (rad)
         """
-        # Relative position in nav frame
-        rel_pos_nav = self.target_pos - self.drone_pos
-        distance = np.linalg.norm(rel_pos_nav)
+        if not self._visual_los_valid:
+            # No valid LightTrack tracking — return default (drone will hover)
+            self.get_logger().warn("⚠️ No valid visual LOS from LightTrack!")
+            return np.zeros(9, dtype=np.float32)
 
-        # Unit LOS vector (u_los)
-        u_los = rel_pos_nav / max(distance, 1e-6)
-
-        # LOS angular velocity (lambda) — finite difference of rel_pos
-        if self._prev_rel_pos is not None:
-            lambda_vec = (rel_pos_nav - self._prev_rel_pos) / max(self.dt, 1e-6)
-            # Normalise by distance to get angular rate (rad/s)
-            lambda_vec = lambda_vec / max(distance, 1e-6)
-        else:
-            lambda_vec = np.zeros(3)
-        self._prev_rel_pos = rel_pos_nav.copy()
+        u_los = self._visual_los_nav.copy()
+        lambda_vec = self._visual_lambda_nav.copy()
 
         # Clamp lambda to reasonable range
         lambda_vec = np.clip(lambda_vec, -10.0, 10.0)
@@ -717,38 +990,59 @@ class DroneAttackEnv(gym.Env, Node):
 
         # 1. Closing velocity reward (primary signal)
         #    Negative d_distance = getting closer = positive reward
-        reward -= 3.0 * d_distance
+        #    FIX: Increased from 3.0 to 10.0 — at 50Hz, closing at 1 m/s
+        #    gives d_distance=-0.02, reward=+0.2. Time penalty is -0.05.
+        #    Net +0.15/step makes closing distance strongly rewarded.
+        reward -= 10.0 * d_distance
 
         # 2. Time penalty (encourages fast attacks)
         reward -= 0.05
 
-        # 3. Progressive proximity bonuses
-        if distance < 20.0:
+        # 3. Progressive proximity bonuses (stronger to motivate approach)
+        if distance < 50.0:
             reward += 0.5
-        if distance < 10.0:
+        if distance < 30.0:
             reward += 1.0
-        if distance < 5.0:
+        if distance < 20.0:
             reward += 2.0
-        if distance < 2.0:
+        if distance < 10.0:
             reward += 5.0
+        if distance < 5.0:
+            reward += 10.0
+        if distance < 2.0:
+            reward += 20.0
 
         # 4. Action regularisation (penalise large/jerky actions)
         reward -= 0.005 * np.sum(action ** 2)
 
-        # 4b. Horizontal velocity penalty (discourage sideways drift)
-        # FIX: Without this, RL agent learns to hover at high altitude
-        # instead of descending towards target. Penalising horizontal
-        # velocity encourages the drone to move towards the target rather
-        # than drifting sideways or maintaining altitude.
+        # 4a. Deceleration penalty — negative acc_x = braking = longer attack
+        # BC data had acc_x ∈ [0, 15.4], all positive. NN must learn to always
+        # accelerate forward. Penalty scales linearly with deceleration magnitude.
+        # At acc_x=-5: penalty=-15.0/step, dominates closing velocity (+10.0).
+        if action[0] < 0.0:
+            reward -= 3.0 * abs(action[0])
+
+        # 4b. Sideways drift penalty (only perpendicular to LOS)
+        # FIX: Original code penalised ALL horizontal velocity, including
+        # movement toward the target. This prevented the drone from closing
+        # distance. Now we only penalise the component perpendicular to LOS.
         horiz_vel = np.sqrt(self.drone_vel[0]**2 + self.drone_vel[1]**2)
-        reward -= 0.01 * horiz_vel
+        if distance > 1.0:
+            # LOS direction in XY plane
+            los_x = (self.target_pos[0] - self.drone_pos[0]) / distance
+            los_y = (self.target_pos[1] - self.drone_pos[1]) / distance
+            # Velocity component along LOS (positive = toward target)
+            vel_along_los = self.drone_vel[0] * los_x + self.drone_vel[1] * los_y
+            # Perpendicular component (sideways drift)
+            vel_perp = abs(horiz_vel - abs(vel_along_los)) if horiz_vel > 0.1 else 0
+            reward -= 0.02 * vel_perp
 
         # 5. Terminal rewards (applied when episode ends)
         # FIX: Reward crash penalty only after grace period, same as _check_done().
         # Without this, reward=-100 accumulates during grace period, making
         # the policy learn that "being on the ground = bad" instead of learning
         # to fly towards the target.
-        if distance < self.hit_threshold:
+        if distance < self.hit_threshold and self._attack_started:
             reward += 200.0  # HIT!
         elif -self.drone_pos[2] < self.min_altitude and self.step_count > self._crash_grace_steps:
             odom_age = time.time() - self._last_odom_time if self._last_odom_time > 0 else 999
@@ -804,16 +1098,20 @@ class DroneAttackEnv(gym.Env, Node):
         odom_age = time.time() - self._last_odom_time if self._last_odom_time > 0 else 999
         odom_fresh = odom_age < 2.0
 
-        if distance < self.hit_threshold and odom_fresh:
+        # HIT: horizontal distance < 1.0m AND altitude < 2m AND odom fresh
+        altitude = -self.drone_pos[2]  # NED: altitude = -z
+        horiz_dist = np.sqrt(
+            (self.target_pos[0] - self.drone_pos[0])**2
+            + (self.target_pos[1] - self.drone_pos[1])**2
+        )
+        if horiz_dist < self.hit_threshold and altitude < 2.0 and odom_fresh and self._attack_started:
             self._total_hits += 1
             self.get_logger().info(
-                f"HIT! Distance: {distance:.2f}m | "
+                f"HIT! h_dist={horiz_dist:.2f}m alt={altitude:.1f}m | "
                 f"HITS: {self._total_hits}/{self._total_episodes} "
                 f"({100*self._total_hits/max(1,self._total_episodes):.0f}%)"
             )
             return True, False
-        elif distance < self.hit_threshold and not odom_fresh:
-            pass  # odom stale — distance is unreliable, skip HIT
 
         # FIX: NED coordinate system — PX4 uses z-down, so altitude = -z.
         # Without this, drone at 15m (z=-15) would read as altitude=-15
@@ -832,8 +1130,9 @@ class DroneAttackEnv(gym.Env, Node):
             self.get_logger().warn(f"💥 CRASH! Altitude: {altitude:.2f}m (z={self.drone_pos[2]:.2f})")
             return True, False
         elif altitude > 100.0:
-            self.get_logger().warn(f"📐 TOO HIGH! Altitude: {altitude:.1f}m")
-            return True, False
+            self.get_logger().warn(f"📐 TOO HIGH! Altitude: {altitude:.1f}m — EKF divergence")
+            raise RuntimeError(
+                f"EKF_DIVERGENCE: altitude {altitude:.1f}m > 100m limit")
 
         # Horizontal distance limit (XY plane)
         horiz_dist = np.sqrt(
@@ -847,6 +1146,30 @@ class DroneAttackEnv(gym.Env, Node):
         if distance > self.max_distance:
             self.get_logger().warn(f"📡 LOST TARGET! Distance: {distance:.1f}m")
             return True, False
+
+        # Stale odom timeout — episode is stuck if odom dead for >15s
+        if self.step_count > self._crash_grace_steps and odom_age > 15.0:
+            self.get_logger().error(
+                f"💀 ODOM DEAD {odom_age:.0f}s — PX4 EKF lost. "
+                f"Raising exception for full pipeline restart.")
+            raise RuntimeError(
+                f"ODOM_DEAD: PX4 EKF lost for {odom_age:.0f}s. "
+                "Full pipeline restart required.")
+
+        # Stuck detection — if altitude doesn't change for 5s, drone is stuck
+        if self.step_count > self._crash_grace_steps:
+            current_alt = -self.drone_pos[2]
+            if abs(current_alt - self._last_alt_for_stuck) < 0.3:
+                self._stuck_steps += 1
+            else:
+                self._stuck_steps = 0
+                self._last_alt_for_stuck = current_alt
+
+            if self._stuck_steps > self._stuck_threshold:
+                self.get_logger().warn(
+                    f"⚠️ DRONE STUCK — altitude unchanged ({current_alt:.1f}m) "
+                    f"for {self._stuck_steps} steps. Ending episode.")
+                return True, False
 
         # Truncation (timeout)
         if elapsed > self.max_episode_time:
@@ -872,36 +1195,76 @@ class DroneAttackEnv(gym.Env, Node):
         FIX: Gravity compensation — PX4 OFFBOARD acceleration mode does NOT
         compensate gravity. NN must output +9.81 upward to hover.
 
-        FIX: Target visibility check — if no valid target in camera frame,
-        hover instead of sending NN acceleration. Prevents drone from
-        flying blindly when LightTrack reports false positive.
+        FIX: Target visibility check — when LightTrack loses tracking,
+        _get_obs() returns zeros. Drone hovers in place and yaws toward
+        target (from Gazebo ground truth) until tracking resumes.
         """
-        # Check if target is visible in observation (u_los != default [1,0,0])
-        target_visible = not (abs(self._last_obs[0] - 1.0) < 0.01
-                              and abs(self._last_obs[1]) < 0.01
-                              and abs(self._last_obs[2]) < 0.01
-                              and abs(self._last_obs[3]) < 0.001
-                              and abs(self._last_obs[4]) < 0.001
-                              and abs(self._last_obs[5]) < 0.001)
+        # Check if target is visible: observation must have non-zero u_los
+        # When LightTrack loses tracking, _get_obs() returns zeros
+        obs_norm = np.linalg.norm(self._last_obs[:3])
+        target_visible = obs_norm > 0.1
 
         if not target_visible:
-            # Target not visible — hover in place, face target direction
-            offboard_msg = OffboardControlMode()
-            offboard_msg.timestamp = int(time.time() * 1e6)
-            offboard_msg.position = True
-            self.offboard_pub.publish(offboard_msg)
+            # Lost tracking — recovery: fly to random altitude + random distance from car
+            if not self._recovery_active:
+                self._recovery_active = True
+                # Random altitude 2-15m (NED: negative Z)
+                alt = np.random.uniform(2.0, 15.0)
+                # Random direction from car, distance 10-120m
+                dist = np.random.uniform(10.0, 120.0)
+                angle = np.random.uniform(0.0, 2.0 * np.pi)
+                # Recovery position in NED
+                self._recovery_target_pos = np.array([
+                    self.target_pos[0] + dist * np.cos(angle),
+                    self.target_pos[1] + dist * np.sin(angle),
+                    -alt,  # NED: z-down
+                ])
+                self.get_logger().info(
+                    f"🔍 Lost tracking — recovery: alt={alt:.1f}m, "
+                    f"dist={dist:.1f}m, angle={np.degrees(angle):.0f}°"
+                )
 
-            ts = TrajectorySetpoint()
-            ts.position = [float("nan"), float("nan"), float("nan")]
-            ts.velocity = [float("nan"), float("nan"), float("nan")]
-            ts.yaw = float(self._compute_yaw_to_target())
-            ts.timestamp = int(time.time() * 1e6)
-            self.setpoint_pub.publish(ts)
+            # Fly toward recovery position using velocity
+            drone_pos = self.drone_pos
+            diff = self._recovery_target_pos - drone_pos
+            dist_to_recovery = np.linalg.norm(diff)
+            if dist_to_recovery > 1.0:
+                # Still flying to recovery point
+                vel = diff / max(dist_to_recovery, 0.1) * self._recovery_speed
+                offboard_msg = OffboardControlMode()
+                offboard_msg.timestamp = int(time.time() * 1e6)
+                offboard_msg.velocity = True
+                self.offboard_pub.publish(offboard_msg)
+
+                ts = TrajectorySetpoint()
+                ts.velocity = [float(vel[0]), float(vel[1]), float("nan")]
+                ts.yaw = float(self._compute_yaw_to_target())
+                ts.timestamp = int(time.time() * 1e6)
+                self.setpoint_pub.publish(ts)
+            else:
+                # At recovery point — hover and yaw toward car
+                offboard_msg = OffboardControlMode()
+                offboard_msg.timestamp = int(time.time() * 1e6)
+                offboard_msg.position = True
+                self.offboard_pub.publish(offboard_msg)
+
+                ts = TrajectorySetpoint()
+                ts.position = [float("nan"), float("nan"), float("nan")]
+                ts.velocity = [float("nan"), float("nan"), float("nan")]
+                ts.yaw = float(self._compute_yaw_to_target())
+                ts.timestamp = int(time.time() * 1e6)
+                self.setpoint_pub.publish(ts)
             return
+        else:
+            # Tracking restored — cancel recovery
+            self._recovery_active = False
 
         # Rotate body-frame acceleration to navigation (NED) frame
         R = self._rpy_to_rot(self.drone_rpy)  # body→nav rotation matrix
         acc_nav = R @ np.array(action[:3], dtype=np.float64)
+
+        # Safety: clamp NaN/inf to prevent PX4 weirdness
+        acc_nav = np.where(np.isfinite(acc_nav), acc_nav, 0.0)
 
         # FIX: PX4 OFFBOARD acceleration mode does NOT compensate gravity.
         # The NN must output +9.81 upward (NED: Z=-9.81) to hover.
@@ -909,19 +1272,23 @@ class DroneAttackEnv(gym.Env, Node):
         GRAVITY_COMP = 9.81  # m/s^2 upward in NED = negative Z
         acc_nav[2] -= GRAVITY_COMP
 
-        # FIX: Safety altitude override — untrained PPO sends random
-        # accelerations including downward. Without this, drone crashes
-        # into ground every episode before it can learn anything.
-        # Hard floor at 2m, soft floor at 5m.
-        current_alt = -self.drone_pos[2]
-        if current_alt < 2.0:
-            acc_nav[2] = min(acc_nav[2], -5.0)  # force strong climb
-        elif current_alt < 5.0 and acc_nav[2] > 0:
-            acc_nav[2] = min(acc_nav[2], -2.0)  # prevent descent
+        # ── Forward push: DISABLED for testing ──
+        # When NN is untrained, drone just hovers. With bias=3.0, NN
+        # output is irrelevant — bias dominates. Removing bias forces
+        # NN to learn actual navigation.
+        forward_bias = 0.0
+        acc_nav[0] += forward_bias * np.cos(float(self.drone_rpy[2]))  # North
+        acc_nav[1] += forward_bias * np.sin(float(self.drone_rpy[2]))  # East
+
+        # ── Altitude safety floors: DISABLED for NN training ──
+        # NN must learn to control altitude from reward signal.
+        # With safety floors, NN output is overridden and never learns.
 
         msg = TrajectorySetpoint()
         msg.timestamp = int(time.time() * 1e6)
 
+        # Safety clamp: prevent extreme acceleration values
+        acc_nav = np.clip(acc_nav, -20.0, 20.0)
         msg.acceleration = [float(acc_nav[0]), float(acc_nav[1]), float(acc_nav[2])]
 
         # NaN for unused fields (position/velocity control disabled)
@@ -982,29 +1349,41 @@ class DroneAttackEnv(gym.Env, Node):
     # ──────────────────────────────────────────────────────────────────────
 
     def _try_gazebo_reset(self):
-        """Try Gazebo reset via service. Returns True if successful.
-
-        Calls /gazebo/reset_simulation service provided by
-        gazebo_reset_service node (from rl_pipeline_launch.py).
-        This teleports drone + target back to spawn positions and
-        resets Gazebo physics. If service is unavailable, returns
-        False and caller falls back to manual descent.
-        """
+        """Try Gazebo reset via service. Returns True if successful."""
         try:
-            if self.reset_sim_client.wait_for_service(timeout_sec=2.0):
-                req = Trigger.Request()
-                future = self.reset_sim_client.call_async(req)
-                rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-                if future.result() and future.result().success:
+            if not self.reset_sim_client.wait_for_service(timeout_sec=5.0):
+                self.get_logger().warn("⚠️ Gazebo reset service not available")
+                return False
+
+            req = Trigger.Request()
+            future = self.reset_sim_client.call_async(req)
+
+            # Spin executor to process the response (uses the node's executor)
+            deadline = time.time() + 15.0
+            while time.time() < deadline:
+                # Try both spin_once and checking future directly
+                rclpy.spin_once(self, timeout_sec=0.1)
+                if future.done():
+                    break
+
+            if future.done():
+                result = future.result()
+                if result is not None and result.success:
                     self.get_logger().info("✅ Gazebo reset successful")
+                    # Wait for physics to settle after reset
+                    self._sim_sleep(2.0)
                     return True
                 else:
                     self.get_logger().warn("⚠️ Gazebo reset returned false")
+                    return False
             else:
-                self.get_logger().warn("⚠️ Gazebo reset service not available")
+                self.get_logger().warn("⚠️ Gazebo reset timed out (15s)")
+                # Cancel the future to avoid resource leak
+                future.cancel()
+                return False
         except Exception as e:
             self.get_logger().warn(f"⚠️ Gazebo reset failed: {e}")
-        return False
+            return False
 
     def _reset_simulation(self):
         """Reset Gazebo simulation via service calls."""
@@ -1042,7 +1421,6 @@ class DroneAttackEnv(gym.Env, Node):
         self.drone_rpy = np.zeros(3)
         self.target_pos = np.array(self.target_start_pose, dtype=float)
         self.prev_distance = np.inf
-        self._prev_rel_pos = None
 
         self._sim_sleep(1.0)
 
@@ -1105,24 +1483,99 @@ class DroneAttackEnv(gym.Env, Node):
         self._sim_sleep(1.0)
 
     def _soft_reset(self):
-        """Recover from crash without losing odom/IMU continuity.
+        """Recover from crash: disarm → wait → rearm.
 
-        Flow: DISARM → wait 5s for EKF to realign → REARM + OFFBOARD → takeoff.
-        No Gazebo reset → EKF state is preserved, just re-initialized from IMU.
+        Does NOT use Gazebo set_pose — it causes PX4 EKF divergence.
+        After disarm, EKF settles on ground. After rearm, drone takes off.
+        If drone is flipped and can't climb, stuck detection terminates
+        the episode and consecutive failures trigger full pipeline restart.
         """
         self.get_logger().info("🔄 Soft reset: disarm → wait → rearm...")
 
-        # 1. DISARM — motors off, EKF starts re-aligning from IMU
+        # 1. DISARM — motors off, drone settles on ground
         self._disarm()
+        # Reset odom state so glitch filter is fresh after rearm
+        self._odom_received = False
+        self._last_odom_time = 0.0
+        self._sim_sleep(3.0)
 
-        # 2. Wait for EKF to stabilize (5s on ground → clean IMU integration)
-        self.get_logger().info("⏳ Waiting 5s for EKF to realign...")
-        self._sim_sleep(5.0)
+        # 2. Wait for EKF to settle (drone on ground, IMU consistent)
+        self.get_logger().info("⏳ Waiting 5s for EKF to settle on ground...")
+        settle_start = time.time()
+        odom_recovered = False
+        while time.time() - settle_start < 5.0:
+            rclpy.spin_once(self, timeout_sec=0.01)
+            odom_age = time.time() - self._last_odom_time if self._last_odom_time > 0 else 999
+            if odom_age < 2.0:
+                odom_recovered = True
+                self.get_logger().info(
+                    f"✅ EKF settled after {time.time()-settle_start:.1f}s")
+                break
+            self._sim_sleep(0.1)
+
+        if not odom_recovered:
+            self.get_logger().warn("⚠️ EKF still stale — attempting rearm anyway")
 
         # 3. REARM + OFFBOARD
         self._arm_and_takeoff()
 
-        self.get_logger().info("✅ Soft reset complete — ready for next episode")
+        # 4. Check if rearm succeeded
+        ARMING_STATE_ARMED = 2
+        if (self.vehicle_status is None or
+                self.vehicle_status.arming_state != ARMING_STATE_ARMED):
+            self._consecutive_reset_fails += 1
+            self.get_logger().error(
+                f"❌ Soft reset FAILED (rearm failed, "
+                f"consecutive fails: {self._consecutive_reset_fails}/{self._max_reset_fails})")
+            if self._consecutive_reset_fails >= self._max_reset_fails:
+                self.get_logger().error(
+                    "💀 Too many consecutive soft reset failures — "
+                    "requesting full pipeline restart")
+                return False  # Signal to caller: needs full restart
+
+        self._consecutive_reset_fails = 0
+        # Diagnostic: log PX4 state after successful soft reset
+        if self.vehicle_status:
+            self.get_logger().info(
+                f"✅ Soft reset complete — PX4: nav_state={self.vehicle_status.nav_state}, "
+                f"arming={self.vehicle_status.arming_state}")
+        else:
+            self.get_logger().info("✅ Soft reset complete")
+        return True  # Signal: success
+
+    def _restart_pipeline(self):
+        """DEPRECATED: Full pipeline restart from inside Python is unreliable.
+
+        DDS bridge does not reconnect after PX4 restart, causing odom to
+        stay dead. Use external launcher (stable_rl_launcher.sh) instead.
+        """
+        self.get_logger().error(
+            "❌ _restart_pipeline() called but is DEPRECATED — "
+            "DDS does not reconnect after restart. "
+            "External launcher (stable_rl_launcher.sh) handles full restart.")
+        return False
+
+    def _wait_for_px4_ready(self, timeout=30.0):
+        """Wait until PX4 reports fresh odom and is ready for arming.
+
+        Checks:
+        - vehicle_odometry topic is alive (odom_age < 2s)
+        - vehicle_status received (not None)
+        """
+        self.get_logger().info(f"⏳ Waiting up to {timeout}s for PX4 to be ready...")
+        start = time.time()
+        while time.time() - start < timeout:
+            rclpy.spin_once(self, timeout_sec=0.05)
+            odom_age = time.time() - self._last_odom_time if self._last_odom_time > 0 else 999
+            if odom_age < 2.0 and self.vehicle_status is not None:
+                self.get_logger().info(
+                    f"✅ PX4 ready after {time.time()-start:.1f}s "
+                    f"(odom_age={odom_age:.1f}s)")
+                return True
+            self._sim_sleep(0.2)
+        self.get_logger().warn(
+            f"⚠️ PX4 not fully ready after {timeout}s — attempting arm anyway")
+        return False
 
     def _arm_and_takeoff(self):
         """Arm the drone and switch to OFFBOARD mode.
@@ -1156,7 +1609,9 @@ class DroneAttackEnv(gym.Env, Node):
             self.setpoint_pub.publish(ts)
             self._sim_sleep(0.05)
 
-        # 2. Switch to OFFBOARD mode
+        # 2. Switch to OFFBOARD mode — publish heartbeat DURING mode switch
+        #    FIX: Remove 1s dead zone where no heartbeats were sent.
+        #    PX4's COM_OF_LOSS_T (500ms) would fire and revert to POSCTL.
         offboard_cmd = VehicleCommand()
         offboard_cmd.command = 176  # MAV_CMD_DO_SET_MODE
         offboard_cmd.param1 = 1.0  # Custom mode
@@ -1168,9 +1623,8 @@ class DroneAttackEnv(gym.Env, Node):
         offboard_cmd.from_external = True
         offboard_cmd.timestamp = int(time.time() * 1e6)
         self.cmd_pub.publish(offboard_cmd)
-        self._sim_sleep(1.0)
 
-        # 3. Keep sending heartbeat to confirm OFFBOARD is active
+        # Keep heartbeats flowing during mode switch (no dead zone!)
         for _ in range(20):  # 1 second at 20 Hz
             offboard_msg = OffboardControlMode()
             offboard_msg.timestamp = int(time.time() * 1e6)
@@ -1185,20 +1639,72 @@ class DroneAttackEnv(gym.Env, Node):
             self.setpoint_pub.publish(ts)
             self._sim_sleep(0.05)
 
-        # 4. ARM (after OFFBOARD is confirmed)
-        arm_cmd = VehicleCommand()
-        arm_cmd.command = 400  # MAV_CMD_COMPONENT_ARM_DISARM
-        arm_cmd.param1 = 1.0  # ARM
-        arm_cmd.target_system = 1
-        arm_cmd.target_component = 1
-        arm_cmd.source_system = 101
-        arm_cmd.source_component = 1
-        arm_cmd.from_external = True
-        arm_cmd.timestamp = int(time.time() * 1e6)
-        self.cmd_pub.publish(arm_cmd)
-        self._sim_sleep(1.0)
+        # 3. Verify OFFBOARD mode is active after mode switch
+        NAVIGATION_STATE_OFFBOARD = 14
+        for _ in range(20):  # 1 second verification
+            rclpy.spin_once(self, timeout_sec=0.05)
+            if (self.vehicle_status is not None and
+                    self.vehicle_status.nav_state == NAVIGATION_STATE_OFFBOARD):
+                self.get_logger().info("✅ OFFBOARD mode confirmed (nav_state=14)")
+                break
+            # Re-send OFFBOARD mode if not active
+            self.cmd_pub.publish(offboard_cmd)
+            self._sim_sleep(0.05)
+        else:
+            self.get_logger().warn(
+                f"⚠️ OFFBOARD mode not confirmed — nav_state="
+                f"{self.vehicle_status.nav_state if self.vehicle_status else 'None'}")
 
-        self.get_logger().info("✅ Armed, OFFBOARD mode active — takeoff via position setpoints")
+        # 4. ARM with retry — verify PX4 actually arms
+        ARMING_STATE_ARMED = 2  # px4_msgs::VehicleStatus::ARMING_STATE_ARMED
+        max_arm_attempts = 10
+        for attempt in range(1, max_arm_attempts + 1):
+            # Spin to receive fresh vehicle_status
+            for _ in range(10):
+                rclpy.spin_once(self, timeout_sec=0.01)
+                self._sim_sleep(0.01)
+
+            # Check if already armed + OFFBOARD active
+            if (self.vehicle_status is not None and
+                    self.vehicle_status.arming_state == ARMING_STATE_ARMED):
+                nav = self.vehicle_status.nav_state
+                self.get_logger().info(
+                    f"✅ Armed (attempt {attempt}) — nav_state={nav}, "
+                    f"{'OFFBOARD confirmed' if nav == NAVIGATION_STATE_OFFBOARD else 'WARNING: not OFFBOARD'}")
+                break
+
+            # Not armed yet — send ARM command + OFFBOARD heartbeat
+            self.get_logger().info(
+                f"⏳ ARM attempt {attempt}/{max_arm_attempts} — "
+                f"arming_state={self.vehicle_status.arming_state if self.vehicle_status else 'None'}")
+
+            offboard_msg = OffboardControlMode()
+            offboard_msg.timestamp = int(time.time() * 1e6)
+            offboard_msg.position = True
+            self.offboard_pub.publish(offboard_msg)
+
+            ts = TrajectorySetpoint()
+            ts.position = [float(self.drone_pos[0]), float(self.drone_pos[1]), float(self.drone_pos[2])]
+            ts.velocity = [float("nan"), float("nan"), float("nan")]
+            ts.yaw = float("nan")
+            ts.timestamp = int(time.time() * 1e6)
+            self.setpoint_pub.publish(ts)
+
+            arm_cmd = VehicleCommand()
+            arm_cmd.command = 400  # MAV_CMD_COMPONENT_ARM_DISARM
+            arm_cmd.param1 = 1.0  # ARM
+            arm_cmd.target_system = 1
+            arm_cmd.target_component = 1
+            arm_cmd.source_system = 101
+            arm_cmd.source_component = 1
+            arm_cmd.from_external = True
+            arm_cmd.timestamp = int(time.time() * 1e6)
+            self.cmd_pub.publish(arm_cmd)
+            self._sim_sleep(1.0)
+        else:
+            self.get_logger().error(
+                f"❌ Failed to arm after {max_arm_attempts} attempts — "
+                f"arming_state={self.vehicle_status.arming_state if self.vehicle_status else 'None'}")
 
     def _start_target_movement(self):
         """Start target movement based on current trajectory pattern."""
@@ -1398,7 +1904,7 @@ if __name__ == "__main__":
 
     env = DroneAttackEnv(
         max_episode_time=10.0,
-        hit_threshold=1.5,
+            hit_threshold=1.0,
         control_rate_hz=50,
         randomize_on_reset=False,
     )

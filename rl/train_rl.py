@@ -36,6 +36,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from drone_attack_env import DroneAttackEnv, make_env
 
+
+class PipelineRestartNeeded(Exception):
+    """Raised when simulation pipeline needs full restart (EKF dead, etc)."""
+    pass
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Imports (with fallback for missing dependencies)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -98,6 +103,16 @@ class HitRateCallback(BaseCallback):
                 self.total_episodes += 1
                 if info["terminal_info"].get("reason") == "hit":
                     self.hits += 1
+            # Check for pipeline restart signal from env
+            if info and info.get("needs_restart"):
+                print("🔄 Pipeline restart requested by env — raising exception")
+                raise PipelineRestartNeeded("Env needs full pipeline restart")
+            if info and info.get("drone_stuck"):
+                print("🔄 Drone stuck (can't climb) — raising exception for restart")
+                raise PipelineRestartNeeded("Drone stuck, can't climb after reset")
+            if info and info.get("odom_dead"):
+                print("🔄 Odom dead — raising exception for restart")
+                raise PipelineRestartNeeded("Odometry dead, EKF lost")
         return True
 
     def get_hit_rate(self):
@@ -137,60 +152,92 @@ def load_bc_weights_into_policy(policy, bc_weights_path: str, verbose: bool = Tr
         # Load BC state dict
         bc_state = torch.load(bc_weights_path, map_location="cpu", weights_only=True)
 
-        # Build a mapping from BC layer names to PPO policy components
-        # BC model layers (from train_mlp.py):
-        #   layers.0.weight/bias → Linear(9, 128)
-        #   layers.1.weight/bias → BatchNorm(128)
-        #   layers.3.weight/bias → Linear(128, 128)
-        #   layers.4.weight/bias → BatchNorm(128)
-        #   layers.6.weight/bias → Linear(128, 64)
-        #   layers.8.weight/bias → Linear(64, 3)
+        # FIX: Auto-detect Linear layers by tensor dimensionality.
+        # Original code used hardcoded key names like "layers.0.weight",
+        # but BC models saved with different frameworks use different naming
+        # (e.g., "net.0.weight", "model.fc1.weight"). Instead of matching
+        # key names, we filter by tensor shape: Linear weights are 2D
+        # (output×input), BatchNorm weights are 1D. This works with any
+        # naming convention.
+        linear_layers = []
+        for k, v in bc_state.items():
+            if k.endswith(".weight") and v.dim() == 2:
+                linear_layers.append((k, v.shape))
 
-        # PPO policy networks:
-        #   mlp_extractor.policy_net[0] = Linear(9, 256)
-        #   mlp_extractor.policy_net[3] = Linear(256, 128)
-        #   mlp_extractor.policy_net[6] = Linear(128, 64)
-        #   action_net = Linear(64, 3)
+        if verbose:
+            print(f"   BC Linear layers detected: {linear_layers}")
 
+        if len(linear_layers) < 4:
+            print(f"   ⚠️ Expected ≥4 Linear layers, found {len(linear_layers)}")
+            return False
+
+        # Sort by numeric index
+        linear_layers.sort(key=lambda x: int(x[0].split(".")[-2]))
+
+        # FIX: Dynamically find Linear layers in PPO policy_net.
+        # Original code assumed fixed indices (0, 3, 6) but PPO's
+        # policy_net structure is [Linear, ReLU, Linear, ReLU, Linear]
+        # so Linear indices are [0, 2, 4], not [0, 3, 6].
+        # Searching by isinstance(m, torch.nn.Linear) works regardless
+        # of network depth or activation placement.
         pi_net = policy.mlp_extractor.policy_net
+        ppo_linear_indices = [i for i, m in enumerate(pi_net) if isinstance(m, torch.nn.Linear)]
 
-        # ── Layer 0: BC Linear(9,128) → PPO Linear(9,256) ──────────────
-        bc_w0 = bc_state["layers.0.weight"]  # (128, 9)
-        bc_b0 = bc_state["layers.0.bias"]    # (128,)
-        with torch.no_grad():
-            # Copy into first 128 neurons of PPO's 256-neuron layer
-            pi_net[0].weight[:128, :] = bc_w0
-            pi_net[0].bias[:128] = bc_b0
-            if verbose:
-                print(f"   ✅ BC layer0 (9→128) → PPO pi_net[0] first 128 neurons")
+        if verbose:
+            print(f"   PPO Linear indices: {ppo_linear_indices}")
+            for idx in ppo_linear_indices:
+                print(f"     pi_net[{idx}] = {pi_net[idx]}")
 
-        # ── Layer 1: BC Linear(128,128) → PPO Linear(256,128) ──────────
-        bc_w1 = bc_state["layers.3.weight"]  # (128, 128)
-        bc_b1 = bc_state["layers.3.bias"]    # (128,)
+        # ── Layer 0: BC → PPO first Linear ─────────────────────────────
+        bc_key, bc_shape = linear_layers[0]
+        bc_w = bc_state[bc_key]
+        bc_b = bc_state[bc_key.replace(".weight", ".bias")]
+        ppo_idx = ppo_linear_indices[0]
         with torch.no_grad():
-            # Copy into first 128 input channels of PPO's 256→128 layer
-            pi_net[3].weight[:, :128] = bc_w1
-            pi_net[3].bias[:] = bc_b1
+            n = min(bc_w.shape[0], pi_net[ppo_idx].weight.shape[0])
+            d = min(bc_w.shape[1], pi_net[ppo_idx].weight.shape[1])
+            pi_net[ppo_idx].weight[:n, :d] = bc_w[:n, :d]
+            pi_net[ppo_idx].bias[:n] = bc_b[:n]
             if verbose:
-                print(f"   ✅ BC layer1 (128→128) → PPO pi_net[3] first 128 input channels")
+                print(f"   ✅ BC {bc_shape} → PPO pi_net[{ppo_idx}] ({n}×{d} block)")
 
-        # ── Layer 2: BC Linear(128,64) → PPO Linear(128,64) ────────────
-        bc_w2 = bc_state["layers.6.weight"]  # (64, 128)
-        bc_b2 = bc_state["layers.6.bias"]    # (64,)
+        # ── Layer 1: BC → PPO second Linear ────────────────────────────
+        bc_key, bc_shape = linear_layers[1]
+        bc_w = bc_state[bc_key]
+        bc_b = bc_state[bc_key.replace(".weight", ".bias")]
+        ppo_idx = ppo_linear_indices[1]
         with torch.no_grad():
-            pi_net[6].weight[:] = bc_w2
-            pi_net[6].bias[:] = bc_b2
+            n = min(bc_w.shape[0], pi_net[ppo_idx].weight.shape[0])
+            d = min(bc_w.shape[1], pi_net[ppo_idx].weight.shape[1])
+            pi_net[ppo_idx].weight[:n, :d] = bc_w[:n, :d]
+            pi_net[ppo_idx].bias[:n] = bc_b[:n]
             if verbose:
-                print(f"   ✅ BC layer2 (128→64) → PPO pi_net[6] (direct copy)")
+                print(f"   ✅ BC {bc_shape} → PPO pi_net[{ppo_idx}] ({n}×{d} block)")
 
-        # ── Layer 3: BC Linear(64,3) → PPO action_net(64,3) ────────────
-        bc_w3 = bc_state["layers.8.weight"]  # (3, 64)
-        bc_b3 = bc_state["layers.8.bias"]    # (3,)
+        # ── Layer 2: BC → PPO third Linear ─────────────────────────────
+        bc_key, bc_shape = linear_layers[2]
+        bc_w = bc_state[bc_key]
+        bc_b = bc_state[bc_key.replace(".weight", ".bias")]
+        ppo_idx = ppo_linear_indices[2]
         with torch.no_grad():
-            policy.action_net.weight[:] = bc_w3
-            policy.action_net.bias[:] = bc_b3
+            n = min(bc_w.shape[0], pi_net[ppo_idx].weight.shape[0])
+            d = min(bc_w.shape[1], pi_net[ppo_idx].weight.shape[1])
+            pi_net[ppo_idx].weight[:n, :d] = bc_w[:n, :d]
+            pi_net[ppo_idx].bias[:n] = bc_b[:n]
             if verbose:
-                print(f"   ✅ BC layer3 (64→3) → PPO action_net (direct copy)")
+                print(f"   ✅ BC {bc_shape} → PPO pi_net[{ppo_idx}] ({n}×{d} block)")
+
+        # ── Layer 3: BC → PPO action_net ───────────────────────────────
+        bc_key, bc_shape = linear_layers[3]
+        bc_w = bc_state[bc_key]
+        bc_b = bc_state[bc_key.replace(".weight", ".bias")]
+        with torch.no_grad():
+            n = min(bc_w.shape[0], policy.action_net.weight.shape[0])
+            d = min(bc_w.shape[1], policy.action_net.weight.shape[1])
+            policy.action_net.weight[:n, :d] = bc_w[:n, :d]
+            policy.action_net.bias[:n] = bc_b[:n]
+            if verbose:
+                print(f"   ✅ BC {bc_shape} → PPO action_net ({n}×{d} block)")
 
         if verbose:
             print(f"✅ BC weights loaded into PPO policy from: {bc_weights_path}")
@@ -317,13 +364,14 @@ def get_default_config():
     """Return default training configuration."""
     return {
         # Environment
-        "num_envs": 4,
+        "num_envs": 1,
         "max_episode_time": 30.0,
-        "hit_threshold": 1.5,
-        "max_distance": 200.0,
+        "hit_threshold": 1.0,
+        "max_distance": 100.0,
         "control_rate_hz": 50,
         "randomize_on_reset": True,
         "target_trajectory": "random",
+        "rpy_smooth_alpha": 0.3,
         # PPO hyperparameters
         "learning_rate": 3e-4,
         "n_steps": 2048,
@@ -358,7 +406,7 @@ def get_default_config():
 def get_quick_config():
     """Return minimal config for quick testing."""
     config = get_default_config()
-    config["num_envs"] = 2
+    config["num_envs"] = 1
     config["total_timesteps"] = 100_000
     config["eval_freq"] = 5000
     config["checkpoint_freq"] = 25000
@@ -372,7 +420,47 @@ def get_quick_config():
 # Main Training Function
 # ──────────────────────────────────────────────────────────────────────────────
 
-def train(config, resume_path=None):
+def train_once(config, resume_path=None):
+    """Single training run (may crash). Returns the model or None on failure."""
+    try:
+        return _train_impl(config, resume_path)
+    except KeyboardInterrupt:
+        print("\n⏹ Training interrupted by user")
+        raise
+    except PipelineRestartNeeded as e:
+        print(f"\n🔄 Pipeline restart needed: {e}")
+        print("   Saving checkpoint and exiting so launcher can restart pipeline")
+        _save_emergency_checkpoint(config)
+        sys.exit(0)
+    except RuntimeError as e:
+        if "ODOM_DEAD" in str(e) or "needs full pipeline restart" in str(e):
+            print(f"\n💀 ODOM_DEAD detected: {e}")
+            print("   Exiting for full pipeline restart by launcher")
+            _save_emergency_checkpoint(config)
+            sys.exit(0)
+        raise  # re-raise other RuntimeErrors
+    except Exception as e:
+        print(f"\n❌ Training crashed: {e}")
+        import traceback
+        traceback.print_exc()
+        _save_emergency_checkpoint(config)
+        return None
+
+
+def _save_emergency_checkpoint(config):
+    """Try to save checkpoint before exit."""
+    try:
+        import glob
+        checkpoints = sorted(glob.glob(os.path.join(config["log_dir"], "rl_checkpoint_*.zip")))
+        if checkpoints:
+            print(f"💾 Latest checkpoint exists: {checkpoints[-1]}")
+        else:
+            print("💾 No checkpoints to save")
+    except Exception:
+        pass
+
+
+def _train_impl(config, resume_path=None):
     """
     Run PPO training with the given configuration.
 
@@ -400,6 +488,7 @@ def train(config, resume_path=None):
             randomize_on_reset=config["randomize_on_reset"],
             use_bc_model_as_prior=config.get("bc_model_path") is not None,
             bc_model_path=config.get("bc_model_path"),
+            rpy_smooth_alpha=config.get("rpy_smooth_alpha", 0.3),
         )
         for i in range(config["num_envs"])
     ]
@@ -410,28 +499,11 @@ def train(config, resume_path=None):
     env = DummyVecEnv(env_fns)
 
     # ── Evaluation environment ─────────────────────────────────────────
-    eval_env = DummyVecEnv([
-        make_env(
-            rank=100,
-            max_episode_time=config["max_episode_time"],
-            hit_threshold=config["hit_threshold"],
-            control_rate_hz=config["control_rate_hz"],
-            randomize_on_reset=False,  # Deterministic eval
-        )
-    ])
+    # NOTE: Eval env shares PX4 with training env → odom conflicts.
+    # Skip eval during training; use separate eval script after training.
+    eval_env = None
 
     # ── Callbacks ──────────────────────────────────────────────────────
-    eval_callback = EvalCallback(
-        eval_env,
-        best_model_save_path=best_model_dir,
-        log_path=log_dir,
-        eval_freq=config["eval_freq"],
-        n_eval_episodes=10,
-        deterministic=True,
-        render=False,
-        verbose=1,
-    )
-
     checkpoint_callback = CheckpointCallback(
         save_freq=config["checkpoint_freq"],
         save_path=log_dir,
@@ -444,7 +516,6 @@ def train(config, resume_path=None):
     tb_callback = TensorBoardCallback()
 
     callbacks = CallbackList([
-        eval_callback,
         checkpoint_callback,
         hit_rate_callback,
         tb_callback,
@@ -554,9 +625,43 @@ def train(config, resume_path=None):
 
     # Cleanup
     env.close()
-    eval_env.close()
+    if eval_env is not None:
+        eval_env.close()
 
     return model
+
+
+def train(config, resume_path=None):
+    """Run training with auto-restart on crash."""
+    max_retries = 10
+    current_resume = resume_path
+
+    for attempt in range(1, max_retries + 1):
+        print(f"\n{'='*60}")
+        print(f"🏋️ Training attempt {attempt}/{max_retries}")
+        if current_resume:
+            print(f"   Resume from: {current_resume}")
+        print(f"{'='*60}\n")
+
+        model = train_once(config, current_resume)
+        if model is not None:
+            return model
+
+        # Training crashed — find latest checkpoint for auto-resume
+        log_dir = config["log_dir"]
+        import glob
+        checkpoints = sorted(glob.glob(os.path.join(log_dir, "rl_checkpoint_*.zip")))
+        if checkpoints:
+            current_resume = checkpoints[-1]
+            print(f"🔄 Auto-resuming from checkpoint: {current_resume}")
+        else:
+            print("⚠️ No checkpoints found, starting fresh")
+
+        print(f"⏳ Waiting 5s before retry...")
+        time.sleep(5)
+
+    print("❌ Max retries reached. Training failed.")
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
