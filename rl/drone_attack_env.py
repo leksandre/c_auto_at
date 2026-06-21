@@ -1093,6 +1093,14 @@ class DroneAttackEnv(gym.Env, Node):
         if action[0] < 0.0:
             reward -= 3.0 * abs(action[0])
 
+        # 4c. Negative velocity penalty — drone flying backwards from target
+        yaw = float(self.drone_rpy[2])
+        forward_x = np.cos(yaw)
+        forward_y = np.sin(yaw)
+        vel_forward = self.drone_vel[0] * forward_x + self.drone_vel[1] * forward_y
+        if vel_forward < 0.0:
+            reward -= 5.0 * abs(vel_forward)
+
         # 4b. Sideways drift penalty (only perpendicular to LOS)
         # FIX: Original code penalised ALL horizontal velocity, including
         # movement toward the target. This prevented the drone from closing
@@ -1175,7 +1183,7 @@ class DroneAttackEnv(gym.Env, Node):
             (self.target_pos[0] - self.drone_pos[0])**2
             + (self.target_pos[1] - self.drone_pos[1])**2
         )
-        if horiz_dist < self.hit_threshold and altitude < 2.0 and odom_fresh and self._attack_started:
+        if horiz_dist < self.hit_threshold and altitude > 1.0 and altitude < 3.0 and odom_fresh and self._attack_started:
             self._total_hits += 1
             self.get_logger().info(
                 f"HIT! h_dist={horiz_dist:.2f}m alt={altitude:.1f}m | "
@@ -1381,11 +1389,8 @@ class DroneAttackEnv(gym.Env, Node):
         msg = TrajectorySetpoint()
         msg.timestamp = int(time.time() * 1e6)
 
-        # Safety clamp: prevent extreme acceleration values
-        # Clip XY to prevent flip — NN outputs large sideways accel → instant flip
-        acc_nav[0] = np.clip(acc_nav[0], -5.0, 5.0)
-        acc_nav[1] = np.clip(acc_nav[1], -5.0, 5.0)
-        acc_nav = np.clip(acc_nav, -20.0, 20.0)
+        # Safety: clamp NaN/inf to prevent PX4 weirdness
+        acc_nav = np.where(np.isfinite(acc_nav), acc_nav, 0.0)
         msg.acceleration = [float(acc_nav[0]), float(acc_nav[1]), float(acc_nav[2])]
 
         # NaN for unused fields (position/velocity control disabled)
