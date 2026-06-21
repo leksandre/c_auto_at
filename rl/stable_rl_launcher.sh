@@ -25,6 +25,7 @@ LIGHTTRACK_LOG="/tmp/lighttrack.log"
 RL_PIPELINE_LOG="/tmp/rl_pipeline.log"
 TRAIN_LOG="/tmp/rl_train.log"
 LOG_DIR="/tmp/rl_stable"
+DRONE_POSE=""
 
 # ── Parse args ────────────────────────────────────────────────────────────
 RESUME_PATH=""
@@ -65,6 +66,16 @@ kill_all() {
     rm -f /dev/shm/* /tmp/cyclone_* /tmp/fastrtps_* /tmp/rmw_* 2>/dev/null
     log "All processes killed + shared memory cleaned"
 }
+
+# ── Trap for graceful shutdown ──────────────────────────────────────────
+cleanup() {
+    log "Launcher shutting down (signal=$1)..."
+    kill_all
+    exit 0
+}
+trap 'cleanup SIGTERM' SIGTERM
+trap 'cleanup SIGINT' SIGINT
+trap 'cleanup EXIT' EXIT
 
 wait_for_px4() {
     log "Waiting for PX4 to be ready..."
@@ -115,7 +126,11 @@ get_arm_failures() {
 
 start_px4() {
     log "Starting PX4 SITL + Gazebo (NVIDIA GPU)..."
-    __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia nohup ros2 launch px4_bringup px4_sim_attack_car.launch.py > "$PX4_LOG" 2>&1 &
+    # Random drone pose: 30-40m from car at [50, 0, 0], yaw toward car
+    local angle=$(python3 -c "import random,math; a=random.uniform(0,2*math.pi); d=random.uniform(30,40); cx=50.0; x=cx+d*math.cos(a); y=d*math.sin(a); yaw=math.atan2(-y,-x); print(f'{x:.2f},{y:.2f},0.0,0.0,0.0,{yaw:.4f}')")
+    DRONE_POSE="$angle"
+    log "Drone pose: $DRONE_POSE"
+    __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia nohup ros2 launch px4_bringup px4_sim_attack_car.launch.py "model_pose:=$DRONE_POSE" > "$PX4_LOG" 2>&1 &
 }
 
 start_dds() {
@@ -131,7 +146,11 @@ start_lighttrack() {
 
 start_rl_pipeline() {
     log "Starting RL Pipeline..."
-    nohup ros2 launch los_guidance rl_pipeline_launch.py > "$RL_PIPELINE_LOG" 2>&1 &
+    local drone_pose_arg=""
+    if [ -n "$DRONE_POSE" ]; then
+        drone_pose_arg="drone_pose:=$DRONE_POSE"
+    fi
+    nohup ros2 launch los_guidance rl_pipeline_launch.py $drone_pose_arg > "$RL_PIPELINE_LOG" 2>&1 &
 }
 
 start_training() {
@@ -248,10 +267,27 @@ while [ $RESTART_COUNT -lt $MAX_PIPELINE_RESTARTS ]; do
         sleep 5
     fi
 
-    # ── Check: EKF divergence (altitude > 50m) ──────────────────────
+    # ── Check: EKF divergence (altitude > 50m or < -2m) ──────────────
     ALT=$(get_ekf_altitude)
     if [ "$(echo "$ALT > 50" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
         log "━━━ EKF DIVERGENCE: altitude=${ALT}m > 50m ━━━"
+        RESTART_COUNT=$((RESTART_COUNT + 1))
+        log "Pipeline restart #$RESTART_COUNT"
+        full_pipeline_start
+
+        LATEST_CKPT=$(find_latest_checkpoint)
+        if [ -n "$LATEST_CKPT" ]; then
+            RESUME_PATH="$LATEST_CKPT"
+        fi
+        start_training
+        LAST_RESTART_TIME=$(date +%s)
+        LAST_EPISODE_COUNT=0
+        LAST_ARM_FAILURES=0
+        LAST_EPISODE_CHANGE_TIME=$(date +%s)
+        continue
+    fi
+    if [ "$(echo "$ALT < -2" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+        log "━━━ EKF DIVERGENCE: altitude=${ALT}m < -2m (underground) ━━━"
         RESTART_COUNT=$((RESTART_COUNT + 1))
         log "Pipeline restart #$RESTART_COUNT"
         full_pipeline_start

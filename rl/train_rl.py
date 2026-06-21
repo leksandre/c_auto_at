@@ -433,8 +433,8 @@ def train_once(config, resume_path=None):
         _save_emergency_checkpoint(config)
         sys.exit(0)
     except RuntimeError as e:
-        if "ODOM_DEAD" in str(e) or "needs full pipeline restart" in str(e):
-            print(f"\n💀 ODOM_DEAD detected: {e}")
+        if "ODOM_DEAD" in str(e) or "needs full pipeline restart" in str(e) or "CONSECUTIVE_CRASHES" in str(e) or "EKF_DIVERGENCE" in str(e):
+            print(f"\n💀 Pipeline restart needed: {e}")
             print("   Exiting for full pipeline restart by launcher")
             _save_emergency_checkpoint(config)
             sys.exit(0)

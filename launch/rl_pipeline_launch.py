@@ -49,6 +49,12 @@ def generate_launch_description():
         description="Gazebo world name",
     )
 
+    drone_pose_arg = DeclareLaunchArgument(
+        "drone_pose",
+        default_value="-1,0,0,0,0,0",
+        description="Drone spawn pose (x,y,z,roll,pitch,yaw)",
+    )
+
     # ── Nodes ──────────────────────────────────────────────────────────
 
     # 1. Gazebo Reset Service
@@ -62,7 +68,7 @@ def generate_launch_description():
                 "world_name": LaunchConfiguration("world_name"),
                 "drone_model_name": "x500_0",
                 "target_model_name": "prius_hybridx_apriltag",
-                "default_drone_pose": [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "default_drone_pose": LaunchConfiguration("drone_pose"),
                 "default_target_pose": [50.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             }
         ],
@@ -109,6 +115,7 @@ def generate_launch_description():
     ld.add_action(speed_arg)
     ld.add_action(turn_rate_arg)
     ld.add_action(world_name_arg)
+    ld.add_action(drone_pose_arg)
 
     ld.add_action(gazebo_reset_node)
     ld.add_action(moving_target_node)
