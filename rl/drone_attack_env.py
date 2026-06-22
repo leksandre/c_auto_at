@@ -146,8 +146,8 @@ class DroneAttackEnv(gym.Env, Node):
         # and always falls. [-20,+20] allows hovering and matches BC model
         # output range (y_max=[15.4, 0.68, 0.29]).
         self.action_space = spaces.Box(
-            low=np.array([-20.0, -20.0, -20.0], dtype=np.float32),
-            high=np.array([20.0, 20.0, 20.0], dtype=np.float32),
+            low=np.array([-15.0, -15.0, -15.0], dtype=np.float32),
+            high=np.array([15.0, 15.0, 15.0], dtype=np.float32),
         )
 
         # Observation: [u_los_xyz, lambda_xyz, roll, pitch, yaw] — 9 floats
@@ -698,19 +698,9 @@ class DroneAttackEnv(gym.Env, Node):
         target_yaw = self._compute_yaw_to_target()
 
         self._hover_and_face_target(duration=5.0)
-        self.get_logger().info("HOVER PHASE complete — attack starting")
-        self._attack_started = True
+        self.get_logger().info("HOVER PHASE complete — waiting for LightTrack lock...")
 
         # 4. Reset internal state
-        self.prev_distance = self._get_distance()
-        self.episode_start_time = time.time()
-        self.step_count = 0
-        self.episode_reward = 0.0
-        self._total_episodes += 1
-        self._rpy_prev = self.drone_rpy.copy()  # Reset EMA state for new episode
-        self._stuck_steps = 0
-        self._last_alt_for_stuck = -self.drone_pos[2]
-        # Reset visual LOS state for new episode
         self._visual_los_valid = False
         self._visual_los_initialized = False
         self._visual_lambda_initialized = False
@@ -719,6 +709,27 @@ class DroneAttackEnv(gym.Env, Node):
         self._visual_los_prev = np.zeros(3)
         self._pixel_initialized = False
         self._tracker_last_timestamp = 0.0
+
+        # Wait for LightTrack to acquire target before starting attack
+        lock_start = time.time()
+        lock_timeout = 5.0
+        while not self._visual_los_valid and (time.time() - lock_start) < lock_timeout:
+            rclpy.spin_once(self, timeout_sec=0.05)
+        if self._visual_los_valid:
+            self.get_logger().info(
+                f"LightTrack locked after {time.time()-lock_start:.1f}s — attack starting")
+        else:
+            self.get_logger().warn(
+                f"No LightTrack lock after {lock_timeout}s — attack starting with zeros")
+        self._attack_started = True
+        self.prev_distance = self._get_distance()
+        self.episode_start_time = time.time()
+        self.step_count = 0
+        self.episode_reward = 0.0
+        self._total_episodes += 1
+        self._rpy_prev = self.drone_rpy.copy()  # Reset EMA state for new episode
+        self._stuck_steps = 0
+        self._last_alt_for_stuck = -self.drone_pos[2]
         # Reset recovery mode
         self._recovery_active = False
 
@@ -1116,6 +1127,19 @@ class DroneAttackEnv(gym.Env, Node):
             vel_perp = abs(horiz_vel - abs(vel_along_los)) if horiz_vel > 0.1 else 0
             reward -= 0.02 * vel_perp
 
+        # 4d. Tilt penalty — penalise large roll/pitch angles
+        # NN must keep drone level to avoid tilt safety triggering
+        # Progressive: small penalty at 15°, large at 30°
+        roll_abs = abs(self.drone_rpy[0])
+        pitch_abs = abs(self.drone_rpy[1])
+        tilt_angle = max(roll_abs, pitch_abs)
+        tilt_warn = np.radians(15.0)
+        tilt_limit = np.radians(30.0)
+        if tilt_angle > tilt_warn:
+            tilt_excess = (tilt_angle - tilt_warn) / (tilt_limit - tilt_warn)
+            tilt_excess = min(tilt_excess, 1.0)
+            reward -= 5.0 * tilt_excess
+
         # 5. Terminal rewards (applied when episode ends)
         # FIX: Reward crash penalty only after grace period, same as _check_done().
         # Without this, reward=-100 accumulates during grace period, making
@@ -1135,13 +1159,19 @@ class DroneAttackEnv(gym.Env, Node):
         # hits the ground before reaching the car.
         target_alt = -self.target_pos[2]  # NED -> altitude
         drone_alt = -self.drone_pos[2]
-        alt_error = abs(drone_alt - target_alt)
-        if alt_error < 3.0:
-            reward += 1.0  # good altitude
-        elif alt_error < 10.0:
-            reward += 0.3
+        alt_error = drone_alt - target_alt  # positive = too high, negative = too low
+        alt_abs_error = abs(alt_error)
+        if alt_abs_error < 2.0:
+            reward += 2.0  # good altitude
+        elif alt_abs_error < 5.0:
+            reward += 0.5
+        elif alt_abs_error < 10.0:
+            reward -= 1.0
         else:
-            reward -= 0.5 * (alt_error / 10.0)  # penalise being far from target altitude
+            reward -= 3.0 * (alt_abs_error / 10.0)
+        # Strong penalty for descending below target (causes crashes)
+        if alt_error < -2.0:
+            reward -= 5.0 * abs(alt_error)
 
         return float(reward)
 
@@ -1363,26 +1393,24 @@ class DroneAttackEnv(gym.Env, Node):
         # NN must learn to control altitude from reward signal.
         # With safety floors, NN output is overridden and never learns.
 
-        # ── Tilt safety: if drone tilts > 20°, send position hold ──
-        # Prevents drone from flipping when NN outputs aggressive sideways accel
+        # ── Tilt safety: if drone tilts > 30°, send velocity hold ──
+        # Velocity hold (zero vel) is gentler than position hold — drone
+        # decelerates smoothly instead of PX4 aggressively forcing position.
         roll_abs = abs(self.drone_rpy[0])
         pitch_abs = abs(self.drone_rpy[1])
         tilt_limit = np.radians(30.0)
         if roll_abs > tilt_limit or pitch_abs > tilt_limit:
-            self.get_logger().warn(
-                f"⚠️ Tilt safety: roll={np.degrees(roll_abs):.0f}° pitch={np.degrees(pitch_abs):.0f}°"
-                f" — position hold to recover")
             msg = TrajectorySetpoint()
             msg.timestamp = int(time.time() * 1e6)
-            msg.position = [float("nan"), float("nan"), float(self.drone_pos[2])]
-            msg.velocity = [float("nan"), float("nan"), float("nan")]
+            msg.position = [float("nan"), float("nan"), float("nan")]
+            msg.velocity = [0.0, 0.0, 0.0]
             msg.acceleration = [float("nan"), float("nan"), float("nan")]
             msg.yaw = float(self._compute_yaw_to_target())
             msg.yawspeed = float("nan")
             self.setpoint_pub.publish(msg)
             offboard_msg = OffboardControlMode()
             offboard_msg.timestamp = int(time.time() * 1e6)
-            offboard_msg.position = True
+            offboard_msg.velocity = True
             self.offboard_pub.publish(offboard_msg)
             return
 

@@ -1,16 +1,18 @@
-# Session Status — 2026-06-21
+# Session Status — 2026-06-22
 
 ## Текущий прогресс
 
 | Метрика | Значение |
 |---------|----------|
-| Hit rate | 0-60% (зависит от сессии) |
-| Hit precision | 0.50-1.00m |
-| Flip events | 0 (XY clip работает) |
-| Crash rate | 3-5 на сессию |
-| Timesteps | ~4,096 / 1,000,000 (0.4%) |
-| Checkpoints | 0 (freq=50k) |
-| Restart count | 18 (auto-recovery) |
+| Action space | **±15** (body frame accel) |
+| Tilt safety | **Velocity hold** (zero vel, not position hold) |
+| Hit rate | >100% (persistent counter) |
+| Hit precision | 0.27-0.34m |
+| Flip events | 0 |
+| Crash rate | 0 за текущую конфигурацию |
+| Tilt safety triggers | 0 |
+| Restarts | 89+ |
+| Known issue | PX4 altitude timeout (velocity controller stuck ~2m) |
 
 ## Команды запуска
 
@@ -80,16 +82,27 @@ docker cp /home/kopty/sim/docker_ws/src/los_guidance/rl/stable_rl_launcher.sh si
 | 9 | Random spawn 30-40m от car | NN учится приближаться |
 | 10 | Enhanced telemetry logging | Видно altitude, distance, velocity |
 
+## Исправления (сессия 2026-06-22)
+
+| # | Исправление | Эффект |
+|---|------------|--------|
+| 11 | LightTrack capture wait (5s timeout) перед attack start | NN получает реальные LOS вместо нулей. Hit rate 0→50% |
+| 12 | Visual LOS state reset перенесён до lock wait | Чистый старт эпизода + корректный захват |
+| 13 | Tilt penalty в reward (-5.0 за tilt>15°) | Уменьшил tilt safety triggers |
+| 14 | Action space ±20→±8 | Предотвратил flip (max tilt ~39°) |
+| 15 | Tilt safety: position hold→velocity hold | Убрал flip от position hold (roll 179°→0) |
+| 16 | Action space ±8→±15 | Увеличил HIT rate (38%→>100%), 0 CRASHes |
+| 17 | Altitude penalty усилен (-5x за alt<-2m) | Предотвратил underground (-8m) |
+
 ## Known Issues
 
 | Проблема | Статус | Причина |
 |----------|--------|---------|
-| Velocity takeoff unreliable | ⚠️ | PX4 velocity controller |
-| 0% hit rate в начале | ✅ | NN尚未 обучился (0.4% steps) |
+| PX4 altitude timeout (~2m stuck) | ⚠️ | PX4 velocity controller не генерирует достаточно lift |
 | EKF divergence через crash cycles | ✅ | Auto-recovery (consecutive crashes) |
 
 ## Git
 
 - Branch: `forGazebo`
-- HEAD: `99eb84c` (stability fixes)
+- HEAD: `d82dbc9`
 - Remote: `https://github.com/leksandre/c_auto_at.git`

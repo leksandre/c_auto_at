@@ -18,7 +18,7 @@ set +u
 set +e
 
 # ── Config ────────────────────────────────────────────────────────────────
-MAX_PIPELINE_RESTARTS=100
+MAX_PIPELINE_RESTARTS=500
 PX4_LOG="/tmp/px4.log"
 MICROXRCE_LOG="/tmp/microxrce.log"
 LIGHTTRACK_LOG="/tmp/lighttrack.log"
