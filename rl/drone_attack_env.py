@@ -63,7 +63,7 @@ class DroneAttackEnv(gym.Env, Node):
 
     def __init__(
         self,
-        max_episode_time: float = 30.0,
+        max_episode_time: float = 90.0,
         hit_threshold: float = 1.0,
         max_distance: float = 100.0,
         min_altitude: float = 0.5,
@@ -888,18 +888,43 @@ class DroneAttackEnv(gym.Env, Node):
         """Wait until sim clock advances by sim_duration seconds."""
         self._sim_sleep(sim_duration)
     def _fly_to_altitude(self, target_alt, timeout=10.0):
-        """Climb/descend to target altitude.
+        """Climb/descend to target altitude using position control.
 
-        PX4 OFFBOARD position control doesn't work from ground level.
-        We use velocity-based takeoff first (climb at 2 m/s), then
-        switch to position control once airborne.
+        Uses PX4 OFFBOARD position setpoint for both climbing and holding.
+        PX4 internal controller handles the velocity profile.
         """
         start = time.time()
         self.get_logger().info(f"Flying to altitude {target_alt:.1f}m (current: {-self.drone_pos[2]:.1f}m)")
 
-        climb_speed = 4.0  # m/s upward (NED: negative Z)
+        # Ensure OFFBOARD mode is active
+        offboard_cmd = VehicleCommand()
+        offboard_cmd.command = 176
+        offboard_cmd.param1 = 1.0
+        offboard_cmd.param2 = 6.0
+        offboard_cmd.target_system = 1
+        offboard_cmd.target_component = 1
+        offboard_cmd.source_system = 101
+        offboard_cmd.source_component = 1
+        offboard_cmd.from_external = True
+        offboard_cmd.timestamp = int(time.time() * 1e6)
+        self.cmd_pub.publish(offboard_cmd)
+
+        # Send position heartbeats to establish OFFBOARD
+        for _ in range(10):
+            offboard_msg = OffboardControlMode()
+            offboard_msg.timestamp = int(time.time() * 1e6)
+            offboard_msg.position = True
+            self.offboard_pub.publish(offboard_msg)
+            ts = TrajectorySetpoint()
+            ts.position = [float(self.drone_pos[0]), float(self.drone_pos[1]), float(self.drone_pos[2])]
+            ts.velocity = [float("nan")] * 3
+            ts.yaw = float("nan")
+            ts.timestamp = int(time.time() * 1e6)
+            self.setpoint_pub.publish(ts)
+            self._sim_sleep(0.05)
 
         while time.time() - start < timeout:
+            rclpy.spin_once(self, timeout_sec=0.01)
             current_alt = -self.drone_pos[2]
             odom_age = time.time() - self._last_odom_time if self._last_odom_time > 0 else 999
 
@@ -907,23 +932,16 @@ class DroneAttackEnv(gym.Env, Node):
                 self.get_logger().info(f"Altitude {current_alt:.1f}m reached")
                 return
 
+            # Position control: hold XY, command Z to target altitude
             offboard_msg = OffboardControlMode()
             offboard_msg.timestamp = int(time.time() * 1e6)
+            offboard_msg.position = True
 
             ts = TrajectorySetpoint()
+            ts.position = [float(self.drone_pos[0]), float(self.drone_pos[1]), -float(target_alt)]
+            ts.velocity = [float("nan")] * 3
             ts.yaw = float("nan")
             ts.timestamp = int(time.time() * 1e6)
-
-            if current_alt < target_alt - 0.5:
-                # Below target: velocity climb (NED: up = negative Z)
-                offboard_msg.velocity = True
-                ts.velocity = [0.0, 0.0, -climb_speed]
-                ts.position = [float("nan")] * 3
-            else:
-                # At or above target: position hold
-                offboard_msg.position = True
-                ts.position = [float("nan"), float("nan"), -float(target_alt)]
-                ts.velocity = [float("nan"), float("nan"), float("nan")]
 
             self.offboard_pub.publish(offboard_msg)
             self.setpoint_pub.publish(ts)
@@ -1081,12 +1099,19 @@ class DroneAttackEnv(gym.Env, Node):
         reward -= 0.05
 
         # 3. Progressive proximity bonuses (stronger to motivate approach)
-        if distance < 50.0:
+        #    Scaled bonuses: larger at far distances to reward initial approach
+        if distance < 100.0:
+            reward += 0.3
+        if distance < 80.0:
             reward += 0.5
-        if distance < 30.0:
+        if distance < 60.0:
+            reward += 0.8
+        if distance < 50.0:
             reward += 1.0
+        if distance < 30.0:
+            reward += 1.5
         if distance < 20.0:
-            reward += 2.0
+            reward += 2.5
         if distance < 10.0:
             reward += 5.0
         if distance < 5.0:
@@ -1154,24 +1179,23 @@ class DroneAttackEnv(gym.Env, Node):
         elif distance > self.max_distance:
             reward -= 50.0  # LOST TARGET
 
-        # FIX: Altitude shaping — reward being at target altitude.
-        # Without this, drone approaches from below (ground level),
-        # hits the ground before reaching the car.
+        # Altitude shaping — bonus for good altitude, penalty for low
         target_alt = -self.target_pos[2]  # NED -> altitude
         drone_alt = -self.drone_pos[2]
-        alt_error = drone_alt - target_alt  # positive = too high, negative = too low
-        alt_abs_error = abs(alt_error)
-        if alt_abs_error < 2.0:
-            reward += 2.0  # good altitude
-        elif alt_abs_error < 5.0:
-            reward += 0.5
-        elif alt_abs_error < 10.0:
-            reward -= 1.0
-        else:
-            reward -= 3.0 * (alt_abs_error / 10.0)
-        # Strong penalty for descending below target (causes crashes)
-        if alt_error < -2.0:
-            reward -= 5.0 * abs(alt_error)
+        alt_error = drone_alt - target_alt
+
+        # Bonus for maintaining attack altitude (5-15m)
+        if 5.0 <= drone_alt <= 15.0:
+            reward += 1.5
+        elif drone_alt < 3.0:
+            reward -= 4.0 * (3.0 - drone_alt)
+        elif drone_alt > 20.0:
+            reward -= 1.0 * (drone_alt - 20.0)
+
+        # Penalty for descending velocity (NED: vel_z < 0 = climbing, > 0 = descending)
+        vert_vel = self.drone_vel[2]  # positive = descending in NED
+        if vert_vel > 0.5:
+            reward -= 3.0 * vert_vel
 
         return float(reward)
 

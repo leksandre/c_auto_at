@@ -124,7 +124,28 @@ namespace los_guidance
     // ── Нейросетевой режим (ONNX) ──────────────────────────────────────
     if (use_nn_ && onnx_session_)
     {
-      return computeNN_(u_los, lambda, roll_rad, pitch_rad, yaw_rad);
+      GuidanceOutput nn_out = computeNN_(u_los, lambda, roll_rad, pitch_rad, yaw_rad);
+      if (!nn_out.is_valid) return nn_out;
+
+      // Clamp acceleration (same as classical path)
+      Eigen::Vector3d acc = clampAcceleration_(nn_out.acceleration_frd);
+      nn_out.acceleration_frd = acc;
+      nn_out.acceleration_cmd = transformAccToNav_(acc, roll_rad, pitch_rad, yaw_rad);
+      last_acc_cmd_ = nn_out.acceleration_cmd;
+
+      // Altitude protection: if too low, override Z to upward
+      if (altitude_valid_ && current_alt_m_ < min_attack_alt_m_)
+      {
+        double up_override = config_.max_up_acc * config_.accel_scale * 0.8;
+        if (nn_out.acceleration_frd.z() > up_override)
+        {
+          nn_out.acceleration_frd.z() = up_override;
+          nn_out.acceleration_cmd = transformAccToNav_(nn_out.acceleration_frd, roll_rad, pitch_rad, yaw_rad);
+          last_acc_cmd_ = nn_out.acceleration_cmd;
+        }
+      }
+
+      return nn_out;
     }
 
     // ── Классический алгоритм (PN/PI/Intercept) ────────────────────────

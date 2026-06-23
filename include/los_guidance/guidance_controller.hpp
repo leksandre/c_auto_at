@@ -313,6 +313,9 @@ namespace los_guidance
      */
     void setGpsVelocity(double velocity_mps) { gps_velocity_ = velocity_mps; }
 
+    void setAltitude(double alt_m) { current_alt_m_ = alt_m; altitude_valid_ = true; }
+    void setMinAttackAltitude(double alt_m) { min_attack_alt_m_ = alt_m; }
+
     // 🧠 === ONNX Neural Network Inference ===
 
     /**
@@ -392,6 +395,11 @@ namespace los_guidance
 
     // === GPS скорость для fallback Vc ===
     double gps_velocity_{0.0};
+
+    // === Altitude protection ===
+    double current_alt_m_{0.0};
+    bool altitude_valid_{false};
+    double min_attack_alt_m_{3.0};
 
     // === Отладка ===
     GuidanceDebug debug_info_;

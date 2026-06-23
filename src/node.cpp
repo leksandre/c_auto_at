@@ -471,6 +471,7 @@ namespace los_guidance
     this->declare_parameter("guidance.neural.enabled", false);
     this->declare_parameter("guidance.neural.model_path", "");
     this->declare_parameter("guidance.neural.scaler_path", "");
+    this->declare_parameter("guidance.neural.min_attack_alt_m", 3.0);
     guidance_config_.use_neural_network = this->get_parameter("guidance.neural.enabled").as_bool();
     guidance_config_.nn_model_path = this->get_parameter("guidance.neural.model_path").as_string();
     guidance_config_.nn_scaler_path = this->get_parameter("guidance.neural.scaler_path").as_string();
@@ -483,6 +484,8 @@ namespace los_guidance
 
     if (guidance_config_.use_neural_network)
     {
+      guidance_ctrl_->setMinAttackAltitude(
+          this->get_parameter("guidance.neural.min_attack_alt_m").as_double());
       if (guidance_ctrl_->isNeuralNetworkLoaded())
       {
         RCLCPP_INFO(this->get_logger(),
@@ -1367,6 +1370,12 @@ namespace los_guidance
       RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                             "📊 Local velocity: vx=%.2f, vy=%.2f, vz=%.2f | hor=%.2f m/s",
                             msg->vx, msg->vy, msg->vz, horizontal_vel);
+    }
+
+    // Feed altitude for NN protection
+    if (msg->z_valid)
+    {
+      guidance_ctrl_->setAltitude(-msg->z);  // NED: z is negative up
     }
   }
 

@@ -365,7 +365,7 @@ def get_default_config():
     return {
         # Environment
         "num_envs": 1,
-        "max_episode_time": 30.0,
+        "max_episode_time": 90.0,
         "hit_threshold": 1.0,
         "max_distance": 100.0,
         "control_rate_hz": 50,
