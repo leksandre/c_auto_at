@@ -888,12 +888,13 @@ class DroneAttackEnv(gym.Env, Node):
         """Wait until sim clock advances by sim_duration seconds."""
         self._sim_sleep(sim_duration)
     def _fly_to_altitude(self, target_alt, timeout=10.0):
-        """Climb/descend to target altitude using position control.
+        """Climb/descend to target altitude using velocity control.
 
-        Uses PX4 OFFBOARD position setpoint for both climbing and holding.
-        PX4 internal controller handles the velocity profile.
+        Position heartbeats to establish OFFBOARD, then velocity climb.
         """
         start = time.time()
+        climb_speed = 3.0
+        slow_zone = 2.0
         self.get_logger().info(f"Flying to altitude {target_alt:.1f}m (current: {-self.drone_pos[2]:.1f}m)")
 
         # Ensure OFFBOARD mode is active
@@ -909,7 +910,7 @@ class DroneAttackEnv(gym.Env, Node):
         offboard_cmd.timestamp = int(time.time() * 1e6)
         self.cmd_pub.publish(offboard_cmd)
 
-        # Send position heartbeats to establish OFFBOARD
+        # Position heartbeats to establish OFFBOARD mode
         for _ in range(10):
             offboard_msg = OffboardControlMode()
             offboard_msg.timestamp = int(time.time() * 1e6)
@@ -932,14 +933,19 @@ class DroneAttackEnv(gym.Env, Node):
                 self.get_logger().info(f"Altitude {current_alt:.1f}m reached")
                 return
 
-            # Position control: hold XY, command Z to target altitude
+            error = target_alt - current_alt
+            if abs(error) < slow_zone:
+                speed = climb_speed * (abs(error) / slow_zone)
+            else:
+                speed = climb_speed
+            vz = -speed if error > 0 else speed
+
             offboard_msg = OffboardControlMode()
             offboard_msg.timestamp = int(time.time() * 1e6)
-            offboard_msg.position = True
+            offboard_msg.velocity = True
 
             ts = TrajectorySetpoint()
-            ts.position = [float(self.drone_pos[0]), float(self.drone_pos[1]), -float(target_alt)]
-            ts.velocity = [float("nan")] * 3
+            ts.velocity = [0.0, 0.0, vz]
             ts.yaw = float("nan")
             ts.timestamp = int(time.time() * 1e6)
 
