@@ -62,7 +62,17 @@ kill_all() {
     pkill -9 -f 'LightTrackNode' 2>/dev/null; true
     pkill -9 -f 'gazebo_reset' 2>/dev/null; true
     pkill -9 -f 'moving_target' 2>/dev/null; true
+    pkill -9 -f 'target_pose_bridge' 2>/dev/null; true
     sleep 3
+    # Second pass: catch stragglers
+    pkill -9 -f 'train_rl' 2>/dev/null; true
+    pkill -9 -f 'px4 ' 2>/dev/null; true
+    pkill -9 -f 'gz sim' 2>/dev/null; true
+    pkill -9 -f 'ros2 launch' 2>/dev/null; true
+    pkill -9 -f 'parameter_bridge' 2>/dev/null; true
+    pkill -9 -f 'LightTrackNode' 2>/dev/null; true
+    pkill -9 -f 'target_pose_bridge' 2>/dev/null; true
+    sleep 1
     rm -f /dev/shm/* /tmp/cyclone_* /tmp/fastrtps_* /tmp/rmw_* 2>/dev/null
     log "All processes killed + shared memory cleaned"
 }

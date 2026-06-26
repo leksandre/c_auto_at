@@ -63,7 +63,7 @@ class DroneAttackEnv(gym.Env, Node):
 
     def __init__(
         self,
-        max_episode_time: float = 90.0,
+        max_episode_time: float = 30.0,
         hit_threshold: float = 1.0,
         max_distance: float = 100.0,
         min_altitude: float = 0.5,
@@ -335,8 +335,14 @@ class DroneAttackEnv(gym.Env, Node):
         )
 
         # ── Target control publisher ────────────────────────────────────
+        target_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
         self.target_cmd_vel_pub = self.create_publisher(
-            Twist, "/cmd_vel", qos
+            Twist, "/cmd_vel", target_qos
         )
 
     def _spin_loop(self):
@@ -653,7 +659,6 @@ class DroneAttackEnv(gym.Env, Node):
 
             self._reset_alt = np.random.uniform(5.0, 20.0)
             self._fly_to_altitude(self._reset_alt, timeout=30.0)
-            self._fly_to_starting_position(min_dist=5.0, max_dist=20.0, timeout=30.0)
 
         # PHASE: Hover + forced turn to target (3s)
         # Drone must face the car before RL attack begins.
@@ -696,25 +701,6 @@ class DroneAttackEnv(gym.Env, Node):
                 f"⚠️ Cannot climb above {min_attack_alt}m after 5 attempts "
                 f"(alt={current_alt:.1f}m) — drone stuck, ending episode")
             return np.zeros(9, dtype=np.float32), {"drone_stuck": True}
-
-        # Settle altitude: switch from velocity to position hold before hover
-        settle_alt = -self.drone_pos[2]
-        self.get_logger().info(f"Settling altitude at {settle_alt:.1f}m (position hold)...")
-        settle_start = time.time()
-        while time.time() - settle_start < 2.0:
-            offboard_msg = OffboardControlMode()
-            offboard_msg.timestamp = int(time.time() * 1e6)
-            offboard_msg.position = True
-            self.offboard_pub.publish(offboard_msg)
-
-            ts = TrajectorySetpoint()
-            ts.position = [float(self.drone_pos[0]), float(self.drone_pos[1]), -float(settle_alt)]
-            ts.velocity = [float("nan")] * 3
-            ts.yaw = float("nan")
-            ts.timestamp = int(time.time() * 1e6)
-            self.setpoint_pub.publish(ts)
-            self._sim_sleep(0.1)
-
         target_yaw = self._compute_yaw_to_target()
 
         self._hover_and_face_target(duration=5.0)
@@ -786,10 +772,10 @@ class DroneAttackEnv(gym.Env, Node):
         """Fly drone toward target until within distance_threshold.
 
         Used during reset when drone is >60m from car.
-        Sends position setpoints toward target.
+        Sends velocity commands toward target at 5 m/s.
         """
         start = time.time()
-        hold_alt = -self.drone_pos[2]
+        speed = 5.0  # m/s toward target
 
         while time.time() - start < timeout:
             dist = self._get_distance()
@@ -797,28 +783,28 @@ class DroneAttackEnv(gym.Env, Node):
                 self.get_logger().info(f"✅ Within {distance_threshold}m (now {dist:.0f}m)")
                 return
 
+            target_yaw = self._compute_yaw_to_target()
             dx = self.target_pos[0] - self.drone_pos[0]
             dy = self.target_pos[1] - self.drone_pos[1]
             norm = max(dist, 0.1)
-            target_x = self.drone_pos[0] + dx / norm * min(dist - distance_threshold + 5.0, 10.0)
-            target_y = self.drone_pos[1] + dy / norm * min(dist - distance_threshold + 5.0, 10.0)
+            vx = dx / norm * speed
+            vy = dy / norm * speed
 
             offboard_msg = OffboardControlMode()
             offboard_msg.timestamp = int(time.time() * 1e6)
-            offboard_msg.position = True
+            offboard_msg.velocity = True
             self.offboard_pub.publish(offboard_msg)
 
             ts = TrajectorySetpoint()
-            ts.position = [float(target_x), float(target_y), -float(hold_alt)]
-            ts.velocity = [float("nan")] * 3
-            ts.yaw = float(self._compute_yaw_to_target())
+            ts.velocity = [float(vx), float(vy), float("nan")]
+            ts.yaw = float(target_yaw)
             ts.timestamp = int(time.time() * 1e6)
             self.setpoint_pub.publish(ts)
             self._sim_sleep(0.1)
 
         self.get_logger().warn(f"Fly-to-target timeout ({timeout}s)")
 
-    def _fly_to_starting_position(self, min_dist=5.0, max_dist=20.0, timeout=30.0):
+    def _fly_to_starting_position(self, min_dist=10.0, max_dist=20.0, timeout=30.0):
         """Fly drone to a random position at min_dist-max_dist from target.
 
         Used during reset to ensure drone starts at a meaningful distance
@@ -829,12 +815,13 @@ class DroneAttackEnv(gym.Env, Node):
 
         target_x = self.target_pos[0] + dist * np.cos(angle)
         target_y = self.target_pos[1] + dist * np.sin(angle)
-        hold_alt = -self.drone_pos[2]
+        target_z = self.drone_pos[2]  # keep current altitude
 
         self.get_logger().info(
             f"🎯 Flying to start position: dist={dist:.1f}m angle={np.degrees(angle):.0f}°")
 
         start = time.time()
+        speed = 5.0
 
         while time.time() - start < timeout:
             dx = target_x - self.drone_pos[0]
@@ -845,14 +832,20 @@ class DroneAttackEnv(gym.Env, Node):
                 self.get_logger().info(f"✅ Start position reached (remaining={remaining:.1f}m)")
                 return
 
+            norm = max(remaining, 0.1)
+            vx = dx / norm * speed
+            vy = dy / norm * speed
+
+            hold_alt = self.drone_pos[2]  # NED: keep current altitude
+
             offboard_msg = OffboardControlMode()
             offboard_msg.timestamp = int(time.time() * 1e6)
-            offboard_msg.position = True
+            offboard_msg.velocity = True
             self.offboard_pub.publish(offboard_msg)
 
             ts = TrajectorySetpoint()
-            ts.position = [float(target_x), float(target_y), -float(hold_alt)]
-            ts.velocity = [float("nan")] * 3
+            ts.velocity = [float(vx), float(vy), 0.0]
+            ts.position = [float("nan"), float("nan"), float(hold_alt)]
             ts.yaw = float(self._compute_yaw_to_target())
             ts.timestamp = int(time.time() * 1e6)
             self.setpoint_pub.publish(ts)
@@ -880,7 +873,7 @@ class DroneAttackEnv(gym.Env, Node):
 
             ts = TrajectorySetpoint()
             ts.position = [float("nan"), float("nan"), -float(hold_alt)]
-            ts.velocity = [float("nan"), float("nan"), 0.0]
+            ts.velocity = [float("nan"), float("nan"), float("nan")]
             ts.yaw = float(target_yaw)
             ts.timestamp = int(time.time() * 1e6)
             self.setpoint_pub.publish(ts)
@@ -903,43 +896,17 @@ class DroneAttackEnv(gym.Env, Node):
     def _sim_wait_for_sim_time(self, sim_duration, wall_timeout=10.0):
         """Wait until sim clock advances by sim_duration seconds."""
         self._sim_sleep(sim_duration)
-    def _fly_to_altitude(self, target_alt, timeout=10.0):
-        """Climb/descend to target altitude using hybrid control.
+    def _fly_to_altitude(self, target_alt, timeout=30.0):
+        """Climb/descend to target altitude using velocity control.
 
-        Velocity climb to 3m, then position control for precise altitude.
+        PX4 OFFBOARD position control doesn't work from ground level.
+        We use velocity-based climb (climb at 4 m/s), then
+        switch to position control once airborne.
         """
         start = time.time()
-        climb_speed = 10.0
-        slow_zone = 2.0
-        velocity_phase_alt = 3.0  # Switch to position control above this
         self.get_logger().info(f"Flying to altitude {target_alt:.1f}m (current: {-self.drone_pos[2]:.1f}m)")
 
-        # Ensure OFFBOARD mode is active
-        offboard_cmd = VehicleCommand()
-        offboard_cmd.command = 176
-        offboard_cmd.param1 = 1.0
-        offboard_cmd.param2 = 6.0
-        offboard_cmd.target_system = 1
-        offboard_cmd.target_component = 1
-        offboard_cmd.source_system = 101
-        offboard_cmd.source_component = 1
-        offboard_cmd.from_external = True
-        offboard_cmd.timestamp = int(time.time() * 1e6)
-        self.cmd_pub.publish(offboard_cmd)
-
-        # Position heartbeats to establish OFFBOARD mode
-        for _ in range(10):
-            offboard_msg = OffboardControlMode()
-            offboard_msg.timestamp = int(time.time() * 1e6)
-            offboard_msg.position = True
-            self.offboard_pub.publish(offboard_msg)
-            ts = TrajectorySetpoint()
-            ts.position = [float(self.drone_pos[0]), float(self.drone_pos[1]), float(self.drone_pos[2])]
-            ts.velocity = [float("nan")] * 3
-            ts.yaw = float("nan")
-            ts.timestamp = int(time.time() * 1e6)
-            self.setpoint_pub.publish(ts)
-            self._sim_sleep(0.05)
+        climb_speed = 4.0  # m/s upward (NED: negative Z)
 
         while time.time() - start < timeout:
             rclpy.spin_once(self, timeout_sec=0.01)
@@ -950,42 +917,25 @@ class DroneAttackEnv(gym.Env, Node):
                 self.get_logger().info(f"Altitude {current_alt:.1f}m reached")
                 return
 
-            error = target_alt - current_alt
+            offboard_msg = OffboardControlMode()
+            offboard_msg.timestamp = int(time.time() * 1e6)
 
-            # Phase 1: Velocity climb to 3m
-            if current_alt < velocity_phase_alt:
-                if abs(error) < slow_zone:
-                    speed = climb_speed * (abs(error) / slow_zone)
-                else:
-                    speed = climb_speed
-                vz = -speed if error > 0 else speed
+            ts = TrajectorySetpoint()
+            ts.timestamp = int(time.time() * 1e6)
 
-                offboard_msg = OffboardControlMode()
-                offboard_msg.timestamp = int(time.time() * 1e6)
+            if current_alt < target_alt - 0.5:
                 offboard_msg.velocity = True
-
-                ts = TrajectorySetpoint()
-                ts.velocity = [0.0, 0.0, vz]
-                ts.yaw = float("nan")
-                ts.timestamp = int(time.time() * 1e6)
-
-                self.offboard_pub.publish(offboard_msg)
-                self.setpoint_pub.publish(ts)
-            # Phase 2: Position control above 3m
+                ts.velocity = [0.0, 0.0, -climb_speed]
+                ts.position = [float("nan")] * 3
             else:
-                offboard_msg = OffboardControlMode()
-                offboard_msg.timestamp = int(time.time() * 1e6)
                 offboard_msg.position = True
-
-                ts = TrajectorySetpoint()
-                ts.position = [float(self.drone_pos[0]), float(self.drone_pos[1]), -float(target_alt)]
+                ts.position = [float("nan"), float("nan"), -float(target_alt)]
                 ts.velocity = [float("nan")] * 3
-                ts.yaw = float("nan")
-                ts.timestamp = int(time.time() * 1e6)
 
-                self.offboard_pub.publish(offboard_msg)
-                self.setpoint_pub.publish(ts)
+            ts.yaw = float("nan")
 
+            self.offboard_pub.publish(offboard_msg)
+            self.setpoint_pub.publish(ts)
             self._sim_sleep(0.05)
 
         self.get_logger().warn(f"Altitude timeout ({timeout}s, wanted {target_alt:.1f}m, got {-self.drone_pos[2]:.1f}m)")
@@ -1695,16 +1645,22 @@ class DroneAttackEnv(gym.Env, Node):
         self._sim_sleep(5.0)
 
         # 2. Wait for EKF to settle (drone on ground, IMU consistent)
-        self.get_logger().info("⏳ Waiting 15s for EKF to settle on ground...")
+        #    Minimum 5s settle regardless of odom freshness — EKF needs
+        #    time to converge on ground after crash dynamics
+        MIN_SETTLE_TIME = 5.0
+        MAX_SETTLE_TIME = 15.0
+        self.get_logger().info(
+            f"⏳ Waiting {MIN_SETTLE_TIME:.0f}-{MAX_SETTLE_TIME:.0f}s for EKF to settle on ground...")
         settle_start = time.time()
         odom_recovered = False
-        while time.time() - settle_start < 15.0:
+        while time.time() - settle_start < MAX_SETTLE_TIME:
             rclpy.spin_once(self, timeout_sec=0.01)
+            elapsed = time.time() - settle_start
             odom_age = time.time() - self._last_odom_time if self._last_odom_time > 0 else 999
-            if odom_age < 2.0:
+            if elapsed >= MIN_SETTLE_TIME and odom_age < 2.0:
                 odom_recovered = True
                 self.get_logger().info(
-                    f"✅ EKF settled after {time.time()-settle_start:.1f}s")
+                    f"✅ EKF settled after {elapsed:.1f}s")
                 break
             self._sim_sleep(0.1)
 
